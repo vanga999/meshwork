@@ -12,8 +12,9 @@ Meshwork manages tasks that pass between people and AI agents. A user or an even
 | --- | --- |
 | Project | A shared workspace with its own team, repositories, reference documents, bots, tasks, and deliverables. An account can join multiple projects. |
 | Member | A real person with a Meshwork account and project permissions. Members can receive tasks, submit deliverables, request changes, and approve handoffs. |
-| Bot | A personal or project-owned entry point that binds a trigger to a workflow and defines its operating rules. A project bot has a visible identity in the project timeline. |
+| Bot | A personal or project-owned entry point for a workflow. It defines the operating rules and has a visible identity in the task timeline. |
 | Workflow | A versioned definition of steps, responsibilities, inputs, expected outputs, and transitions. A responsibility such as reviewer is bound to a person or an agent step. |
+| Trigger node | A workflow node that starts a run or advances a waiting step when a configured event matches. It defines the event type, sources, filters, and input mapping. |
 | Task | A unit of work with an objective, context, acceptance criteria, a timeline, and deliverables. A task can have multiple workflow runs over time. |
 | Run and step attempt | A run records one execution of a specific workflow version. A step attempt records one execution or human submission within that run. |
 | Executor and runner | An executor carries out an agent step. Codex is the first planned executor. A runner is the Meshwork process on the machine that starts and manages the executor. |
@@ -23,7 +24,7 @@ Meshwork manages tasks that pass between people and AI agents. A user or an even
 | | Personal bot | Project bot |
 | --- | --- | --- |
 | Ownership | Created and managed in the user's desktop workspace. | Created by an authorized project member and owned by the project. |
-| Trigger | A user starts a local task from the desktop. | An authorized member starts a project task, or a configured project event starts one. |
+| Trigger | A user starts a local task from the desktop. | A manual or event trigger node starts a run. An event trigger node can also resume a waiting step. |
 | Context | Local directories, user-selected files, and outputs from earlier steps. | Project resources, the triggering event, and deliverables from earlier steps. |
 | Execution | The user's desktop runner uses the local Codex installation and workspace. | The team server assigns agent steps to an eligible desktop runner or headless Linux runner. Human steps go to the assigned member's inbox. |
 | Results | The personal task and its history stay in local storage. | The task, shared deliverables, and review history are visible to authorized project members. |
@@ -36,22 +37,41 @@ The two bot types share the same workflow definition and step semantics. A perso
 flowchart LR
     Desktop[Desktop app] --> Local[Local workflow engine]
     Local --> DesktopRunner[Desktop runner]
-    Desktop <-->|Project tasks and results| Team[Team server]
-    GitHub[GitHub] -->|Pull request events| Team
-    DesktopRunner <-->|Jobs and execution events| Team
-    LinuxRunner[Headless Linux runner] <-->|Jobs and execution events| Team
+    subgraph Team[Team server]
+        Connectors[Event connectors] -->|Verified events| Triggers[Workflow trigger nodes]
+        Triggers --> ProjectWork[Project workflow engine]
+    end
+    Desktop <-->|Project tasks and results| ProjectWork
+    Sources[Event sources] --> Connectors
+    DesktopRunner <-->|Jobs and execution events| ProjectWork
+    LinuxRunner[Headless Linux runner] <-->|Jobs and execution events| ProjectWork
     DesktopRunner --> DesktopCodex[Codex on desktop]
     LinuxRunner --> LinuxCodex[Codex on Linux]
-    Team --> Store[Project records and deliverables]
+    ProjectWork --> Store[Project records and deliverables]
 ```
 
 **Desktop app.** Create personal bots and workflows, join projects, and work from a task inbox. Each task shows its current step, assignee, relevant execution events, and deliverables. The desktop runner handles local execution and can also accept approved project assignments.
 
-**Team server.** Own accounts, project memberships, shared resources, bot configuration, workflow runs, human assignments, and publication records. It receives project events, routes work, and broadcasts task changes. A project available in two desktop clients has one shared task state.
+**Team server.** Own accounts, project memberships, shared resources, bot configuration, workflow runs, human assignments, and publication records. It receives project events through connectors, evaluates trigger nodes, routes work, and broadcasts task changes. A project available in two desktop clients has one shared task state.
 
 **Runners.** The desktop runner and headless Linux runner share the execution code. Each runner manages its own workspace, Codex process, and provider login. An enrolled runner authenticates to the team server and initiates the connection. An eligible runner must have permission to take the step and the required workspace and executor available. A runner can continue a step independently of the desktop window while its process and machine remain running.
 
 The initial stack proposal is Electron, React, and TypeScript for the desktop, a shared Node.js runner for desktop and Linux, and a Node.js team service. SQLite can store personal workflows, tasks, and execution state. PostgreSQL is proposed for shared project records, with a separate file store for uploaded deliverables. Use HTTPS for requests and webhooks and a persistent connection for dispatch, progress, and status updates.
+
+## Workflow trigger nodes
+
+A trigger node configures when a workflow should run and which event data it should receive. An entry trigger creates a run. A trigger inside a run waits for a matching event before advancing. For example, a code review workflow can start when a new revision is submitted, then wait for the CI result for that revision before handing off to a human reviewer.
+
+| Configuration | What it controls |
+| --- | --- |
+| Source | A manual action, a webhook, or one or more configured connections and resources. A project may connect several repositories across GitHub and GitLab. Workflows for documents and other tasks can use triggers without a repository. |
+| Event and filters | The event to match and conditions such as selected repositories, a target branch, or a CI result tied to the current run. |
+| Input mapping | The event fields that become workflow inputs. A code review step receives repository and change identifiers, the revision to review, and a reference to fetch the relevant diff. |
+| Activation | Whether the node starts a new run or advances a waiting step. A waiting step matches the event to its run or resource revision. |
+
+Connectors validate incoming webhook deliveries and map provider events to common Meshwork event types. The team server resolves the connection and resource to the project, then evaluates the node's filters. Event records include the source connection and resource identifiers so that matching, deduplication, and result routing work across hosts and repositories. The same code review workflow can be used with either connector by configuring its trigger sources.
+
+Publishing a result is a separate workflow step with its own connector, destination, and permission. It can use the originating change from the event context as its destination. A workflow can also finish with a report stored in Meshwork.
 
 ## Workflows and handoffs
 
@@ -76,19 +96,19 @@ The reference implementations inform separate parts of the design.
 - Orca runs agents in the environment that owns the worktree and exposes structured chat on supported hosts. That gives Meshwork a reference for runner ownership and task-level execution detail. [Remote Orca Servers](https://orca.dev/docs/remote-servers) · [Orca Chat UI](https://orca.dev/docs/agents/native-chat)
 - Herdr hosts native terminal sessions and uses integration hooks for session identity. This is a reference for a future executor that is available primarily through a terminal. [Herdr integrations](https://herdr.dev/tui/docs/integrations/)
 
-## Pull request review example
+## Code review example
 
-1. A project administrator connects a GitHub repository and configures a review bot with review rules, an eligible runner, and a publication policy. The project grants repository read access for review and explicitly enables the connector's review write access when publication is configured.
-2. An opening or update event reaches the team server. The server verifies the webhook, resolves the repository and PR to the project, and records the PR head commit, comparison base, and workflow version. It deduplicates redelivered events and duplicate automatic runs for the same bot and revision. [GitHub webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request) · [Validating webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
+1. A project administrator configures a review bot and adds a trigger node for newly opened code changes or new revisions. The node selects one or more connected repositories. The project configures review rules, eligible runners, and read access to the selected repositories.
+2. A GitHub pull request or GitLab merge request event reaches the team server. The connector maps the relevant event to the common code change event. The server records the source connection, repository, change identifier, head commit, comparison base, and workflow version. It deduplicates webhook redeliveries and activates each trigger at most once per source change and revision for automatic review. [GitHub pull request events](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request) · [GitLab merge request events](https://docs.gitlab.com/user/project/integrations/webhook_events/#merge-request-events)
 3. The selected runner obtains the diff for that revision and runs a Codex reviewer with the project rules. The default review step reads the diff and related files. Project policy can enable test execution in an isolated workspace. The run records what was actually checked.
 4. The runner submits a structured report with a summary, findings with file and line where applicable, and verification evidence. The project task exposes the report and routes it to a real member when approval is required.
-5. The project connector publishes the allowed report to GitHub if configured. The proposed initial default is an internal report with optional publication after human approval. Before publishing, the server checks that the report still matches the current PR head. A report for an older revision remains in task history while a new revision gets its own review. [GitHub pull request review API](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request)
+5. An optional publication step uses the destination connector to post the allowed report as a GitHub review or GitLab discussion. The proposed initial default is an internal report with optional publication after human approval. The connector requires publication permission and checks that the report still matches the current revision. A report for an older revision remains in task history while a new revision gets its own review. [GitHub pull request review API](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request) · [GitLab merge request discussions API](https://docs.gitlab.com/api/discussions/#create-a-new-thread-in-the-merge-request-diff)
 
 ## Reliability and permissions
 
 - **Dispatch and recovery.** Persist each ready assignment with a stable ID. Only one runner can hold an active claim for an attempt. A disconnected runner's work remains pending reconciliation. On reconnect, match the runner's recorded attempt and provider session before issuing another attempt. If the earlier outcome remains uncertain, show it in the task and allow an authorized person to decide how to proceed.
 - **Result and transition.** Store the accepted result and the next transition in one transaction, using durable references for any attached files. Record a separate publication operation so repeated deliveries can be reconciled before another external write.
-- **Project access.** Use separate identities for user accounts, enrolled runners, and external connectors. Enforce membership and project-level permissions when reading a task, submitting a result, managing a bot, or publishing to GitHub. Limit each runner enrollment to the projects and workspaces it can serve.
+- **Project access.** Use separate identities for user accounts, enrolled runners, and external connectors. Enforce membership and project-level permissions when reading a task, submitting a result, managing a bot, or publishing to an external platform. Limit each runner enrollment to the projects and workspaces it can serve.
 - **Execution access.** Keep Codex credentials on the runner. Treat repository content, diffs, and documents as input to the step. The project's execution policy governs writable paths, command execution, and approvals. Give the reviewer read access by default and give the connector the explicit permission needed for publication.
 - **Offline work.** A personal run stays on the desktop. A project step awaiting an offline runner remains visible to the team. A Linux runner can be configured for workflows that need an always-available execution environment.
 
@@ -96,5 +116,5 @@ The reference implementations inform separate parts of the design.
 
 1. **Personal workflow.** With the team server disconnected, create a local bot, run an ordered workflow using local Codex, and see the resulting artifacts and step history in the task card.
 2. **Project collaboration.** With two real accounts, create a project and a project bot, hand a task step to the second member, and verify that an approval or request for changes appears in both accounts and moves the workflow according to its definition.
-3. **Project PR review.** A PR event starts a review of a pinned revision, eligible desktop and Linux runners can take a review step, and the resulting report is available to the team. A redelivery resolves to the existing review record. Updating the PR gives the new commit its own review and keeps the earlier report in the history.
+3. **Project triggers and code review.** Configure one trigger node for selected GitHub and GitLab repositories. A PR or MR event starts the same review workflow on a pinned revision. Eligible desktop and Linux runners can take the review step, and the resulting report is available to the team. A redelivery resolves to the existing review record. A new commit gets its own review and keeps the earlier report in the history. A waiting step advances when the matching CI result arrives. A manually triggered task can run without a repository connection.
 4. **Recovery.** A runner reconnects after a network interruption, reconciles the existing attempt, and reports a single result or an explicit uncertain state. The task card reflects the outcome and preserves the audit trail.
