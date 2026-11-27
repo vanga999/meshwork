@@ -10,9 +10,9 @@ Create a bot on your desktop to run a workflow over your own projects and files.
 
 ## Project bots
 
-Create a project for your team, invite people with their own accounts, and manage your repositories, documents, tasks, and deliverables in one place. Project bots belong to the project. Their workflows can assign steps to real teammates or agents and can start from project events.
+Create a project for your team, invite people with their own accounts, and manage your repositories, documents, tasks, and deliverables in one place. Project bots belong to the project. Their workflows can assign steps to real teammates or agents and use configurable trigger nodes to start or resume work.
 
-For example, a pull request review bot can start when a PR is opened or updated. It dispatches a Codex review of the specific revision, saves findings in the project, and can pass the report to a teammate for approval before posting it back to GitHub.
+For example, one code review workflow can be triggered by a GitHub pull request or a GitLab merge request across the repositories selected for its trigger. It dispatches a Codex review of the specific revision, saves findings in the project, and can pass the report to a teammate before a separate step publishes it to the source platform. Other workflows can use manual triggers or webhooks for work outside a repository.
 
 ## Where work runs
 
@@ -20,7 +20,7 @@ The desktop app runs personal workflows locally and can execute project steps wh
 
 ## Status
 
-Meshwork is in the design stage. The proposed first release covers a local personal workflow and a shared PR review workflow with a human handoff. See the [design document](docs/design.md) for the architecture, execution model, and release criteria.
+Meshwork is in the design stage. The proposed first release covers a local personal workflow and a shared code review workflow with a human handoff and configurable event sources. See the [design document](docs/design.md) for the architecture, execution model, and release criteria.
 
 ## License
 
