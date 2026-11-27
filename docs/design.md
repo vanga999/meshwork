@@ -6,7 +6,7 @@ This document describes the local desktop release and the planned team architect
 
 ## Local release
 
-The Bots page saves reusable roles with their responsibilities and Codex access. The Projects page saves each project's working directory and ordered workflow in SQLite. A project step can reference a bot and add instructions for that project, or assign a decision to a person. A task snapshots the project configuration and the selected bot versions when it starts. A Codex step uses the project directory and hands its structured result to the next step. A human decision pauses the task until the user submits a note and a decision. The task card keeps the result and attempt history. After a restart, previously running attempts appear as interrupted and can be retried explicitly.
+The Bots page manages reusable bots and local workflows. The Projects page saves the working directory and workflow selection for each project, with Codex as the default. A task snapshots the project, workflow, and bot versions when it starts. A Codex step uses the project directory and hands its structured result to the next step. A human decision pauses the task until the user submits a note and a decision. The task card keeps the result and attempt history. After a restart, previously running attempts appear as interrupted and can be retried explicitly.
 
 The renderer calls a typed workflow API through Electron IPC. The workflow engine depends on a storage interface and a step executor interface. SQLite and Codex App Server are their local implementations. The engine accepts a workflow trigger as input, and the desktop implements manual triggering. These boundaries give the planned team API and runner their integration points.
 
@@ -16,10 +16,10 @@ Meshwork manages tasks that pass between people and AI agents. A user or an even
 
 | Concept | Meaning |
 | --- | --- |
-| Project | The owner of the workspace, workflow definition, tasks, and deliverables. A local project uses a directory on the desktop. A shared project can also have a team and external resources. |
+| Project | Holds the workspace, workflow selection, tasks, and deliverables. A local project uses a directory on the desktop. A shared project can also have its own bots, team, and external resources. |
 | Member | A real person with a Meshwork account and project permissions. Members can receive tasks, submit deliverables, request changes, and approve handoffs. |
 | Bot | A reusable agent role with a name, responsibilities, and execution permissions. A project assigns it to workflow steps and supplies the workspace at runtime. |
-| Workflow | A versioned project definition of steps, responsibilities, inputs, expected outputs, and transitions. Each step can add instructions specific to the project. |
+| Workflow | A versioned definition of steps, responsibilities, inputs, expected outputs, and transitions. Multiple projects can select the same local workflow. Steps can include their own instructions. |
 | Trigger node | A workflow node that starts a run or advances a waiting step when a configured event matches. It defines the event type, sources, filters, and input mapping. |
 | Task | A unit of work with an objective, context, acceptance criteria, a timeline, and deliverables. A task can have multiple workflow runs over time. |
 | Run and step attempt | A run records one execution of a specific workflow version. A step attempt records one execution or human submission within that run. |
@@ -29,7 +29,7 @@ Meshwork manages tasks that pass between people and AI agents. A user or an even
 
 | | Local project | Shared project |
 | --- | --- | --- |
-| Ownership | Created and managed in the user's desktop workspace. | Created by an authorized project member and managed by the project team. |
+| Ownership | Created and managed in the user's desktop workspace. | Created by the team server, assigned to individuals, and managed by the project team. |
 | Trigger | A user starts a local task from the desktop. | A manual or event trigger node starts a run. An event trigger node can also resume a waiting step. |
 | Context | Local directories, user-selected files, and outputs from earlier steps. | Project resources, the triggering event, and deliverables from earlier steps. |
 | Execution | The user's desktop runner uses the local Codex installation and workspace. | The team server assigns agent steps to an eligible desktop runner or headless Linux runner. Human steps go to the assigned member's inbox. |
@@ -81,7 +81,7 @@ Publishing a result is a separate workflow step with its own connector, destinat
 
 ## Workflows and handoffs
 
-The local project editor represents a workflow as an ordered list of bot and human decision steps. A bot step uses the reusable bot's responsibilities and access, plus any instructions configured on the project step. Success advances the workflow, and a failure or a stop with feedback leaves the step available for an explicit retry. A future workflow editor can add conditional transitions and a bounded return path to an earlier step. Each run keeps the project and bot versions it started with.
+The Bots page editor arranges default Codex, custom bot, and human decision steps. A single add button opens the step picker. A bot step uses the bot's responsibilities and access along with its step instructions. A local project can select a workflow or run a task directly with default Codex. Success advances the workflow, and a failure or a stop with feedback leaves the step available for an explicit retry. A future workflow editor can add conditional transitions and a bounded return path to an earlier step.
 
 The workflow engine uses structured step results to choose a transition. An agent can return an outcome, a short summary, and evidence. The runner validates the result against the step definition and gathers the referenced deliverables. Meshwork advances the workflow after it has persisted the result and the required deliverables. A human submits an equivalent outcome from the task card. If a prerequisite is missing, the step records what it needs and stays available for follow-up.
 
@@ -120,12 +120,12 @@ The reference implementations inform separate parts of the design.
 
 ## Local release acceptance
 
-1. **Local project workflow.** Create one bot in the Bots page. Create two projects with different working directories and assign the same bot in both workflows. Run a task in each project and check that Codex reads the correct directory and shows its result in the task card.
+1. **Local project workflow.** Create a local project and run a task with default Codex. Create a workflow on the Bots page and select it in two projects with different working directories. Check that Codex reads the correct directory and shows its result in the task card.
 2. **Human handoff.** Add a human decision step and verify that approval advances the task. The next Codex step receives the previous result and the decision note.
-3. **Local recovery.** Reopen Meshwork and see the saved bots, projects, and tasks. An interrupted step stays visible and requires an explicit retry. Older directory-bound bots become projects with reusable bot steps, and prior task history remains available.
+3. **Local recovery.** Reopen Meshwork and see the saved bots, workflows, projects, and tasks. An interrupted step stays visible and requires an explicit retry. Steps from older projects become reusable workflows, and prior task history remains available.
 
 ## Planned team acceptance
 
-1. **Project collaboration.** With two real accounts, create a project and a project bot, hand a task step to the second member, and verify that an approval or request for changes appears in both accounts and moves the workflow according to its definition.
+1. **Project collaboration.** Create a project on the team server and assign it to a teammate. With two real accounts, verify project visibility, configure a project bot, and hand a task step to the second teammate. Check that an approval or request for changes appears in both accounts and advances the workflow according to its definition.
 2. **Project triggers and code review.** Configure one trigger node for selected GitHub and GitLab repositories. A PR or MR event starts the same review workflow on a pinned revision. Eligible desktop and Linux runners can take the review step, and the resulting report is available to the team. A redelivery resolves to the existing review record. A new commit gets its own review and keeps the earlier report in the history. A waiting step advances when the matching CI result arrives. A manually triggered task can run without a repository connection.
 3. **Runner reconnection.** A runner reconnects after a network interruption, reconciles the existing attempt, and reports a single result or an explicit uncertain state. The task card reflects the outcome and preserves the audit trail.

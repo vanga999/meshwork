@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md) · [Design](docs/design.md)
 
-Meshwork is a desktop task workspace for people and AI agents. Define reusable bots, choose a working directory for each project, and arrange bots and people into a project workflow. Start a task in a project and follow the steps, decisions, and deliverables from its task card.
+Meshwork is a desktop task workspace for people and AI agents. Choose a working directory for a project and run tasks with default Codex or a reusable local workflow. Follow steps, decisions, and deliverables from the task card.
 
 ## Run the local desktop preview
 
@@ -13,21 +13,21 @@ pnpm install
 pnpm dev
 ```
 
-1. Open **Bots** and select **New bot** to define the bot's role, instructions, and Codex access.
-2. Open **Projects** and select **New project** to choose an existing workspace folder. Add bot and human decision steps in the order you want them to run.
-3. Select **Run task** on the project and enter the objective. Codex results and human decisions appear on its task card.
+1. Open **Projects**, choose **New project**, and save it with an existing workspace folder. The workflow defaults to **Default Codex**.
+2. Select **Run task** on the project and enter the objective. Results appear on the task card.
+3. To arrange steps, open **Bots → New workflow** and use **+** to add default Codex, a custom bot, or a human decision. Save the workflow and select it in **Edit project**. Use **Bots → New bot** to define a custom role and access.
 
-SQLite stores local data in the Electron user data directory. An interrupted step can be retried from its task card. Meshwork converts older directory-bound bots into projects with reusable bot steps and retains the previous task history.
+SQLite stores local data in the Electron user data directory. An interrupted step can be retried from its task card. Meshwork migrates existing project steps to local workflows, selects them in their original projects, and retains task history.
 
 Use `pnpm build` to build the app, `pnpm start` to launch an existing build, and `pnpm test` to test workflow handoffs and recovery.
 
 ## Bots and local projects
 
-One bot can work in several projects. For example, define a code reviewer once, use it in two projects with different folders and review instructions, and add a human acceptance step to either workflow. Each task uses the directory and workflow selected by its project.
+Several projects can select the same local workflow. For example, combine a code reviewer and a human acceptance step on the Bots page, then select that workflow in two projects. Each task uses its project's directory and records the workflow and bot versions it starts with.
 
 ## Planned team projects
 
-Create a project for your team, invite people with their own accounts, and manage your repositories, documents, tasks, and deliverables in one place. A team project can own bots and assign workflow steps to a bot or a real teammate. Configurable trigger nodes can start or resume work.
+The team server can create projects and assign them to individual teammates. It manages repositories, documents, tasks, and deliverables. A team project can own bots and assign workflow steps to a bot or a teammate. Configurable trigger nodes can start or resume work.
 
 For example, one code review workflow can be triggered by a GitHub pull request or a GitLab merge request across the repositories selected for its trigger. It dispatches a Codex review of the specific revision, saves findings in the project, and can pass the report to a teammate before a separate step publishes it to the source platform. Other workflows can use manual triggers or webhooks for work outside a repository.
 

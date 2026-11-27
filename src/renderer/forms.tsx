@@ -1,6 +1,6 @@
-import { ArrowDown, ArrowUp, FolderOpen, Play, Plus, Trash2, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Bot as BotIcon, FolderOpen, Play, Plus, Terminal, Trash2, UserRound, X } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import type { Bot, BotInput, Project, ProjectInput, ProjectStep, TaskInput } from '../shared/workflow.ts'
+import { defaultCodexLabel, type Bot, type BotInput, type Project, type ProjectInput, type TaskInput, type Workflow, type WorkflowInput, type WorkflowStep } from '../shared/workflow.ts'
 
 export function errorMessage(error: unknown) {
   return (error instanceof Error ? error.message : String(error)).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
@@ -51,16 +51,40 @@ export function BotEditor({ bot, close, save }: { bot?: Bot; close(): void; save
   </DialogForm>
 }
 
-type DraftStep = { id: string; value: ProjectStep }
-const withDraftId = (value: ProjectStep) => ({ id: crypto.randomUUID(), value })
-
-export function ProjectEditor({ project, bots, close, save }: { project?: Project; bots: Bot[]; close(): void; save(input: ProjectInput): Promise<void> }) {
+export function ProjectEditor({ project, workflows, close, save }: { project?: Project; workflows: Workflow[]; close(): void; save(input: ProjectInput): Promise<void> }) {
   const [name, setName] = useState(project?.name ?? '')
   const [workspace, setWorkspace] = useState(project?.workspace ?? '')
-  const [steps, setSteps] = useState<DraftStep[]>(() => project?.steps.map(withDraftId) ?? [])
+  const [workflowId, setWorkflowId] = useState(project?.workflowId ?? '')
   const [folderError, setFolderError] = useState('')
 
-  function edit(id: string, value: ProjectStep) {
+  return <DialogForm title={project ? 'Edit project' : 'New project'} action="Save project" close={close} submit={() => save({ name, workspace, workflowId: workflowId || undefined })}>
+    <label>Project name<input value={name} onChange={(event) => setName(event.target.value)} required maxLength={100} placeholder="Project name" /></label>
+    <label>Workspace folder
+      <span className="input-group">
+        <input value={workspace} onChange={(event) => setWorkspace(event.target.value)} required placeholder="/path/to/workspace" />
+        <button className="button secondary" type="button" onClick={() => {
+          setFolderError('')
+          void window.meshwork.chooseWorkspace().then((selected) => { if (selected) setWorkspace(selected) }, (error) => setFolderError(errorMessage(error)))
+        }}><FolderOpen size={16} /> Browse</button>
+      </span>
+    </label>
+    {folderError && <p className="form-error" role="alert">{folderError}</p>}
+    <label>Workflow<select value={workflowId} onChange={(event) => setWorkflowId(event.target.value)}>
+      <option value="">{defaultCodexLabel}</option>
+      {workflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name}</option>)}
+    </select></label>
+  </DialogForm>
+}
+
+type DraftStep = { id: string; value: WorkflowStep }
+const withDraftId = (value: WorkflowStep) => ({ id: crypto.randomUUID(), value })
+
+export function WorkflowEditor({ workflow, bots, close, save }: { workflow?: Workflow; bots: Bot[]; close(): void; save(input: WorkflowInput): Promise<void> }) {
+  const [name, setName] = useState(workflow?.name ?? '')
+  const [steps, setSteps] = useState<DraftStep[]>(() => workflow?.steps.map(withDraftId) ?? [])
+  const picker = useRef<HTMLDetailsElement>(null)
+
+  function edit(id: string, value: WorkflowStep) {
     setSteps((current) => current.map((step) => step.id === id ? { id, value } : step))
   }
 
@@ -73,37 +97,47 @@ export function ProjectEditor({ project, bots, close, save }: { project?: Projec
     })
   }
 
-  return <DialogForm title={project ? 'Edit project' : 'New project'} action="Save project" close={close} submit={() => save({ name, workspace, steps: steps.map((step) => step.value) })}>
-    <label>Project name<input value={name} onChange={(event) => setName(event.target.value)} required maxLength={100} placeholder="Project name" /></label>
-    <label>Workspace folder
-      <span className="input-group">
-        <input value={workspace} onChange={(event) => setWorkspace(event.target.value)} required placeholder="/path/to/workspace" />
-        <button className="button secondary" type="button" onClick={() => {
-          setFolderError('')
-          void window.meshwork.chooseWorkspace().then((selected) => { if (selected) setWorkspace(selected) }, (error) => setFolderError(errorMessage(error)))
-        }}><FolderOpen size={16} /> Browse</button>
-      </span>
-    </label>
-    {folderError && <p className="form-error" role="alert">{folderError}</p>}
-    <div className="section-heading"><h3>Workflow steps</h3><span className="muted">Runs in order</span></div>
-    {bots.length === 0 && <p className="muted">Create a reusable role on the Bots page to add a bot step.</p>}
+  function add(value: WorkflowStep) {
+    const step = withDraftId(value)
+    setSteps((current) => [...current, step])
+    if (picker.current) {
+      picker.current.open = false
+      picker.current.querySelector('summary')?.focus()
+    }
+  }
+
+  return <DialogForm title={workflow ? 'Edit workflow' : 'New workflow'} action="Save workflow" close={close} submit={() => {
+    if (!steps.length) throw new Error('Add at least one workflow step.')
+    return save({ name, steps: steps.map((step) => step.value) })
+  }}>
+    <label>Workflow name<input value={name} onChange={(event) => setName(event.target.value)} required maxLength={100} placeholder="Code review and approval" /></label>
+    <div className="section-heading"><h3>Steps</h3><span className="muted">Runs in order</span></div>
     {steps.map(({ id, value }, index) => <fieldset key={id} className="step-form">
       <legend>Step {index + 1}</legend>
       <div className="step-controls">
         <button className="icon-button" type="button" aria-label={`Move step ${index + 1} up`} disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={16} /></button>
         <button className="icon-button" type="button" aria-label={`Move step ${index + 1} down`} disabled={index + 1 === steps.length} onClick={() => move(index, 1)}><ArrowDown size={16} /></button>
-        <button className="icon-button" type="button" aria-label={`Remove step ${index + 1}`} onClick={() => setSteps(steps.filter((step) => step.id !== id))}><Trash2 size={16} /></button>
+        <button className="icon-button" type="button" aria-label={`Remove step ${index + 1}`} onClick={() => setSteps((current) => current.filter((step) => step.id !== id))}><Trash2 size={16} /></button>
       </div>
       {value.kind === 'bot' ? <label>Bot<select value={value.botId} required onChange={(event) => edit(id, { ...value, botId: event.target.value })}>
-        <option value="" disabled>Select a bot</option>
         {bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}
-      </select></label> : <label>Human role<input value={value.role} required maxLength={100} placeholder="Reviewer" onChange={(event) => edit(id, { ...value, role: event.target.value })} /></label>}
-      <label>{value.kind === 'bot' ? 'Project instructions (optional)' : 'Decision instructions'}<textarea value={value.instructions} required={value.kind === 'human'} maxLength={12000} rows={3} placeholder={value.kind === 'bot' ? 'Add instructions for this bot in this project.' : 'Describe what the reviewer should verify.'} onChange={(event) => edit(id, { ...value, instructions: event.target.value })} /></label>
+      </select></label> : value.kind === 'human' ? <label>Human role<input value={value.role} required maxLength={100} placeholder="Reviewer" onChange={(event) => edit(id, { ...value, role: event.target.value })} /></label> : <strong>{defaultCodexLabel}</strong>}
+      <label>{value.kind === 'human' ? 'Decision instructions' : 'Step instructions (optional)'}<textarea value={value.instructions} required={value.kind === 'human'} maxLength={12000} rows={3} placeholder={value.kind === 'human' ? 'Describe what the reviewer should verify.' : 'Describe what this step should do.'} onChange={(event) => edit(id, { ...value, instructions: event.target.value })} /></label>
     </fieldset>)}
-    <div className="actions">
-      <button className="button secondary" type="button" disabled={!bots.length || steps.length >= 20} onClick={() => setSteps([...steps, withDraftId({ kind: 'bot', botId: '', instructions: '' })])}><Plus size={16} /> Add bot step</button>
-      <button className="button secondary" type="button" disabled={steps.length >= 20} onClick={() => setSteps([...steps, withDraftId({ kind: 'human', role: '', instructions: '' })])}><Plus size={16} /> Add human step</button>
-    </div>
+    {steps.length < 20 ? <details className="step-picker" ref={picker} onKeyDown={(event) => {
+      if (event.key === 'Escape' && event.currentTarget.open) {
+        event.preventDefault()
+        event.currentTarget.open = false
+        event.currentTarget.querySelector('summary')?.focus()
+      }
+    }}>
+      <summary className="button secondary" aria-label="Add step" title="Add step"><Plus size={18} /></summary>
+      <div className="step-options">
+        <button type="button" onClick={() => add({ kind: 'codex', instructions: '' })}><Terminal size={16} /> {defaultCodexLabel}</button>
+        {bots.map((bot) => <button key={bot.id} type="button" onClick={() => add({ kind: 'bot', botId: bot.id, instructions: '' })}><BotIcon size={16} /> {bot.name}</button>)}
+        <button type="button" onClick={() => add({ kind: 'human', role: '', instructions: '' })}><UserRound size={16} /> Human decision</button>
+      </div>
+    </details> : <button className="button secondary step-limit" type="button" disabled aria-label="Workflow step limit reached" title="Workflows support up to 20 steps"><Plus size={18} /></button>}
   </DialogForm>
 }
 

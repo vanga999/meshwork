@@ -116,6 +116,8 @@ code, pre { font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
 
 .content-page { overflow: auto; }
 .content-page > p { margin-top: 8px; }
+.bot-library section + section { margin-top: 32px; }
+.bot-library section > p { margin-top: 8px; }
 .bot-grid { margin-top: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 13px; }
 .bot-card, .settings-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 16px; min-width: 0; }
 .bot-card-heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -145,6 +147,14 @@ textarea { resize: vertical; }
 .step-form { display: grid; gap: 10px; border: 1px solid var(--line); position: relative; border-radius: 8px; margin: 0; padding: 12px; min-width: 0; }
 .step-form legend { color: var(--muted); padding: 0 5px; font-size: 12px; }
 .step-controls { position: absolute; right: 7px; top: -22px; background: var(--surface); }
+.step-picker, .step-limit { justify-self: start; }
+.step-picker summary { cursor: pointer; list-style: none; }
+.step-picker summary::-webkit-details-marker { display: none; }
+.step-picker summary:hover { background: #303947; }
+.step-options { display: grid; gap: 3px; margin-top: 6px; padding: 5px; max-height: 220px; overflow: auto; background: #15191e; border: 1px solid var(--line); border-radius: 7px; }
+.step-options button { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-radius: 5px; background: transparent; color: var(--ink); text-align: left; overflow-wrap: anywhere; }
+.step-options button:hover { background: var(--raised); }
+.step-options svg { flex: none; }
 .form-footer { display: flex; justify-content: flex-end; gap: 7px; padding-top: 4px; }
 .form-error { color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; }
 

@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
-import type { Bot, Project, ProjectSnapshot, Task } from '../shared/workflow.ts'
+import type { Bot, Project, ProjectSnapshot, Task, Workflow } from '../shared/workflow.ts'
 
 export interface WorkflowStore {
   listBots(): Bot[]
   getBot(id: string): Bot | undefined
   saveBot(bot: Bot): void
+  listWorkflows(): Workflow[]
+  getWorkflow(id: string): Workflow | undefined
+  saveWorkflow(workflow: Workflow): void
   listProjects(): Project[]
   getProject(id: string): Project | undefined
   saveProject(project: Project): void
@@ -14,7 +17,8 @@ export interface WorkflowStore {
   saveTask(task: Task): void
 }
 
-type Table = 'bots' | 'projects' | 'tasks'
+type Table = 'bots' | 'workflows' | 'projects' | 'tasks'
+type LegacyProject = Project & Pick<Workflow, 'steps'>
 type LegacyTask = Omit<Task, 'project'> & { bot: ProjectSnapshot }
 
 export class SqliteStore implements WorkflowStore {
@@ -25,6 +29,7 @@ export class SqliteStore implements WorkflowStore {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS bots (id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS workflows (id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -35,6 +40,9 @@ export class SqliteStore implements WorkflowStore {
   listBots() { return this.list<Bot>('bots') }
   getBot(id: string) { return this.get<Bot>('bots', id) }
   saveBot(bot: Bot) { this.save('bots', bot) }
+  listWorkflows() { return this.list<Workflow>('workflows') }
+  getWorkflow(id: string) { return this.get<Workflow>('workflows', id) }
+  saveWorkflow(workflow: Workflow) { this.save('workflows', workflow) }
   listProjects() { return this.list<Project>('projects') }
   getProject(id: string) { return this.get<Project>('projects', id) }
   saveProject(project: Project) { this.save('projects', project) }
@@ -71,33 +79,53 @@ export class SqliteStore implements WorkflowStore {
   }
 
   private migrateLegacyWorkflows() {
-    if (this.db.prepare('PRAGMA user_version').get()?.user_version !== 0) return
+    const version = () => Number(this.db.prepare('PRAGMA user_version').get()?.user_version)
+    if (version() >= 2) return
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      for (const record of this.list<Bot | ProjectSnapshot>('bots')) {
-        if (!('steps' in record)) continue
-        const { steps, ...fields } = record
-        const project: Project = {
-          ...fields,
-          steps: steps.map((step) => {
-            if (step.kind === 'human') return step
-            const botId = randomUUID()
-            this.saveBot({ id: botId, name: step.role, instructions: step.instructions, access: step.access, version: 1, updatedAt: record.updatedAt })
-            return { kind: 'bot', botId, instructions: '' }
-          }),
+      const current = version()
+      if (current === 0) this.migrateDirectoryBoundBots()
+      if (current < 2) {
+        for (const project of this.list<Project | LegacyProject>('projects')) {
+          if ('steps' in project) this.extractWorkflow(project)
         }
-        this.saveProject(project)
-        this.db.prepare('DELETE FROM bots WHERE id = ?').run(record.id)
+        this.db.exec('PRAGMA user_version = 2')
       }
-      for (const record of this.list<Task | LegacyTask>('tasks')) {
-        if (!('bot' in record)) continue
-        const { bot, ...fields } = record
-        this.saveTask({ ...fields, project: bot })
-      }
-      this.db.exec('PRAGMA user_version = 1; COMMIT')
+      this.db.exec('COMMIT')
     } catch (error) {
       this.db.exec('ROLLBACK')
       throw error
     }
+  }
+
+  private migrateDirectoryBoundBots() {
+    for (const record of this.list<Bot | ProjectSnapshot>('bots')) {
+      if (!('steps' in record)) continue
+      const { steps, ...fields } = record
+      this.extractWorkflow({
+        ...fields,
+        steps: steps.map((step) => {
+          if (step.kind === 'human') return step
+          const botId = randomUUID()
+          this.saveBot({ id: botId, name: step.role, instructions: step.instructions, access: step.access, version: 1, updatedAt: record.updatedAt })
+          return { kind: 'bot', botId, instructions: '' }
+        }),
+      })
+      this.db.prepare('DELETE FROM bots WHERE id = ?').run(record.id)
+    }
+    for (const record of this.list<Task | LegacyTask>('tasks')) {
+      if (!('bot' in record)) continue
+      const { bot, ...fields } = record
+      this.saveTask({ ...fields, project: bot })
+    }
+  }
+
+  private extractWorkflow({ steps, ...project }: LegacyProject) {
+    if (steps.length) {
+      const workflow: Workflow = { id: randomUUID(), name: project.name, steps, version: 1, updatedAt: project.updatedAt }
+      this.saveWorkflow(workflow)
+      project.workflowId = workflow.id
+    }
+    this.saveProject(project)
   }
 }

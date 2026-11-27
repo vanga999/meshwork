@@ -57,7 +57,7 @@ export function TaskDetail({ task, perform }: { task: Task; perform(action: () =
         {['interrupted', 'failed', 'cancelled'].includes(task.status) && <button className="button secondary" onClick={() => void perform(() => window.meshwork.retryTask(task.id))}><RotateCcw size={15} /> Retry current step</button>}
       </div>
     </header>
-    <div className="step-summary"><h2>Workflow</h2><span>{finished} of {task.project.steps.length} complete</span></div>
+    <div className="step-summary"><h2>{task.project.workflow?.name ?? 'Workflow'}</h2><span>{task.project.workflow && `v${task.project.workflow.version} · `}{finished} of {task.project.steps.length} complete</span></div>
     <ol className="timeline">
       {task.project.steps.map((step, index) => {
         const history = task.attempts.filter((attempt) => attempt.stepIndex === index)
