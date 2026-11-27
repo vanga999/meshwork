@@ -50,7 +50,8 @@ type Versioned = { id: string; version: number; updatedAt: string }
 export type Bot = BotInput & Versioned
 export type Workflow = WorkflowInput & Versioned
 export type Project = ProjectInput & Versioned
-export type Step = z.infer<typeof humanStepSchema> | {
+export type Step = z.infer<typeof humanStepSchema> | CodexStep
+export type CodexStep = {
   kind: 'codex'
   role: string
   instructions: string
@@ -64,13 +65,17 @@ export type ProjectSnapshot = Omit<Project, 'workflowId'> & {
 
 export const defaultCodexLabel = 'Default Codex'
 
+export function defaultCodexStep(instructions = ''): CodexStep {
+  return {
+    kind: 'codex', role: defaultCodexLabel, access: 'workspace-write',
+    instructions: instructions || 'Complete the task objective in the project workspace.',
+  }
+}
+
 export function resolveWorkflowSteps(steps: WorkflowStep[], getBot: (id: string) => Bot | undefined): Step[] {
   return steps.map((step) => {
     if (step.kind === 'human') return step
-    if (step.kind === 'codex') return {
-      kind: 'codex', role: defaultCodexLabel, access: 'workspace-write',
-      instructions: step.instructions || 'Complete the task objective in the project workspace.',
-    }
+    if (step.kind === 'codex') return defaultCodexStep(step.instructions)
     const bot = getBot(step.botId)
     if (!bot) throw new Error('A workflow step references a bot that could not be found.')
     const instructions = step.instructions ? `${bot.instructions}\n\nWorkflow step instructions:\n${step.instructions}` : bot.instructions
@@ -92,14 +97,18 @@ export type WorkflowTrigger =
   | { kind: 'manual'; objective: string }
   | { kind: 'event'; objective: string; source: string; eventId: string }
 
-export type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
+export type AttemptStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
+export type TaskStatus = AttemptStatus | 'queued' | 'awaiting-review'
 export type Activity = { at: string; label: string; detail?: string }
 export type Approval = { id: string; title: string; detail: string }
+export const taskMessageLimit = 12_000
+export type TaskMessage = { id: string; text: string; createdAt: string }
 
 export type Attempt = {
   id: string
   stepIndex: number
-  status: Exclude<TaskStatus, 'queued'>
+  messageId?: string
+  status: AttemptStatus
   startedAt: string
   finishedAt?: string
   provider?: { threadId: string; turnId?: string }
@@ -113,15 +122,26 @@ export type Task = {
   project: ProjectSnapshot
   trigger: WorkflowTrigger
   status: TaskStatus
+  // An index past the workflow's final step identifies a conversation follow-up.
   stepIndex: number
   attempts: Attempt[]
   approvals: Approval[]
+  messages?: TaskMessage[]
   createdAt: string
   updatedAt: string
 }
 
+export const canRetryTask = (task: Task) => ['failed', 'interrupted', 'cancelled'].includes(task.status)
+
+export function canReviewTask(task: Task) {
+  return task.status === 'awaiting-review' || (task.stepIndex === task.project.steps.length && canRetryTask(task))
+}
+
 export type WorkflowSnapshot = { bots: Bot[]; workflows: Workflow[]; projects: Project[]; tasks: Task[] }
 export type Dashboard = WorkflowSnapshot & { codexPath: string }
+export type TaskFilePreview =
+  | { kind: 'text'; text: string; truncated: boolean }
+  | { kind: 'image'; source: string }
 
 export interface WorkflowApi {
   load(): Promise<WorkflowSnapshot>
@@ -129,7 +149,10 @@ export interface WorkflowApi {
   saveWorkflow(input: WorkflowInput, id?: string): Promise<Workflow>
   saveProject(input: ProjectInput, id?: string): Promise<Project>
   startTask(input: TaskInput): Promise<Task>
+  sendFollowUp(id: string, text: string): Promise<void>
+  completeTask(id: string): Promise<void>
   cancelTask(id: string): Promise<void>
+  deleteTask(id: string): Promise<void>
   retryTask(id: string): Promise<void>
   completeHumanStep(id: string, accepted: boolean, note: string): Promise<void>
   answerApproval(taskId: string, approvalId: string, accepted: boolean): Promise<void>
@@ -138,6 +161,7 @@ export interface WorkflowApi {
 
 export interface DesktopApi extends WorkflowApi {
   load(): Promise<Dashboard>
+  previewTaskFile(taskId: string, path: string): Promise<TaskFilePreview>
   chooseWorkspace(): Promise<string | null>
   chooseCodex(): Promise<string | null>
   resetCodex(): Promise<void>

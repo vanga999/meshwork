@@ -14,7 +14,7 @@ pnpm dev
 ```
 
 1. Open **Projects**, choose **New project**, and save it with an existing workspace folder. The workflow defaults to **Default Codex**.
-2. Select **Run task** on the project and enter the objective. Results appear on the task card.
+2. Select **Run task** on the project and enter the objective. When the workflow finishes, the task enters **Awaiting review**. Send feedback from **Conversation** and select **Mark complete** when you accept the result.
 3. To arrange steps, open **Bots → New workflow** and use **+** to add default Codex, a custom bot, or a human decision. Save the workflow and select it in **Edit project**. Use **Bots → New bot** to define a custom role and access.
 
 SQLite stores local data in the Electron user data directory. An interrupted step can be retried from its task card. Meshwork migrates existing project steps to local workflows, selects them in their original projects, and retains task history.

@@ -14,7 +14,7 @@ pnpm dev
 ```
 
 1. 打开 **Projects**，选择 **New project**，指定一个已有工作目录并保存。工作流默认为 **Default Codex**。
-2. 在项目卡上选择 **Run task** 并输入目标。执行结果会显示在任务卡上。
+2. 在项目卡上选择 **Run task** 并输入目标。工作流结束后，任务进入 **Awaiting review**。在任务详情的 **Conversation** 里发返工意见，确认结果后点击 **Mark complete** 结束任务。
 3. 需要编排时，在 **Bots → New workflow** 中用 **+** 添加默认 Codex、自定义 Bot 或人工决策步骤。保存后在 **Edit project** 中选择这套工作流。需要自定义角色和权限时，在 **Bots → New bot** 中定义 Bot。
 
 SQLite 数据库保存在 Electron 用户数据目录。步骤中断后可从任务卡发起重试。已有项目的步骤会迁移为本地工作流并自动关联原项目，任务历史会保留。
