@@ -5,6 +5,7 @@ import type { DesktopApi } from '../shared/workflow.ts'
 const api: DesktopApi = {
   load: () => ipcRenderer.invoke(channels.load),
   saveBot: (input, id) => ipcRenderer.invoke(channels.saveBot, input, id),
+  saveWorkflow: (input, id) => ipcRenderer.invoke(channels.saveWorkflow, input, id),
   saveProject: (input, id) => ipcRenderer.invoke(channels.saveProject, input, id),
   startTask: (input) => ipcRenderer.invoke(channels.startTask, input),
   cancelTask: (id) => ipcRenderer.invoke(channels.cancelTask, id),

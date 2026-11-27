@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { z } from 'zod'
 import { channels } from '../shared/channels.ts'
-import { botSchema, projectSchema, snapshotProject, taskInputSchema, type Bot, type Project } from '../shared/workflow.ts'
+import { botSchema, projectSchema, resolveWorkflowSteps, snapshotProject, taskInputSchema, workflowSchema, type Bot, type Project, type Workflow } from '../shared/workflow.ts'
 import { CodexExecutor, detectCodex } from '../runtime/codex.ts'
 import { SqliteStore } from '../runtime/store.ts'
 import { WorkflowEngine } from '../runtime/workflow-engine.ts'
@@ -58,7 +58,9 @@ else {
     }
     const engine = new WorkflowEngine(store, new CodexExecutor(codex), changed)
     const uuid = z.uuid()
-    register(channels.load, () => ({ bots: store.listBots(), projects: store.listProjects(), tasks: store.listTasks(), codexPath: codex() }))
+    register(channels.load, () => ({
+      bots: store.listBots(), workflows: store.listWorkflows(), projects: store.listProjects(), tasks: store.listTasks(), codexPath: codex(),
+    }))
     register(channels.saveBot, (raw, id) => {
       const input = botSchema.parse(raw)
       const existing = id === undefined ? undefined : store.getBot(uuid.parse(id))
@@ -70,6 +72,18 @@ else {
       changed()
       return bot
     })
+    register(channels.saveWorkflow, (raw, id) => {
+      const input = workflowSchema.parse(raw)
+      const existing = id === undefined ? undefined : store.getWorkflow(uuid.parse(id))
+      if (id !== undefined && !existing) throw new Error('Workflow could not be found.')
+      const workflow: Workflow = {
+        ...input, id: existing?.id ?? randomUUID(), version: (existing?.version ?? 0) + 1, updatedAt: new Date().toISOString(),
+      }
+      resolveWorkflowSteps(workflow.steps, (botId) => store.getBot(botId))
+      store.saveWorkflow(workflow)
+      changed()
+      return workflow
+    })
     register(channels.saveProject, (raw, id) => {
       const input = projectSchema.parse(raw)
       verifyDirectory(input.workspace)
@@ -78,7 +92,7 @@ else {
       const project: Project = {
         ...input, id: existing?.id ?? randomUUID(), version: (existing?.version ?? 0) + 1, updatedAt: new Date().toISOString(),
       }
-      snapshotProject(project, (botId) => store.getBot(botId))
+      if (project.workflowId && !store.getWorkflow(project.workflowId)) throw new Error('The project workflow could not be found.')
       store.saveProject(project)
       changed()
       return project
@@ -88,7 +102,8 @@ else {
       const project = store.getProject(input.projectId)
       if (!project) throw new Error('Choose an existing project.')
       verifyDirectory(project.workspace)
-      return engine.enqueue(snapshotProject(project, (id) => store.getBot(id)), { kind: 'manual', objective: input.objective })
+      const workflow = project.workflowId ? store.getWorkflow(project.workflowId) : undefined
+      return engine.enqueue(snapshotProject(project, workflow, (id) => store.getBot(id)), { kind: 'manual', objective: input.objective })
     })
     register(channels.cancelTask, (id) => engine.cancel(uuid.parse(id)))
     register(channels.retryTask, (id) => engine.retry(uuid.parse(id)))

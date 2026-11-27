@@ -1,6 +1,7 @@
 export const channels = {
   load: 'meshwork:load',
   saveBot: 'meshwork:save-bot',
+  saveWorkflow: 'meshwork:save-workflow',
   saveProject: 'meshwork:save-project',
   startTask: 'meshwork:start-task',
   cancelTask: 'meshwork:cancel-task',
