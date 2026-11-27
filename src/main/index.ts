@@ -5,8 +5,9 @@ import { pathToFileURL } from 'node:url'
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { z } from 'zod'
 import { channels } from '../shared/channels.ts'
-import { botSchema, projectSchema, resolveWorkflowSteps, snapshotProject, taskInputSchema, workflowSchema, type Bot, type Project, type Workflow } from '../shared/workflow.ts'
+import { botSchema, projectSchema, resolveWorkflowSteps, snapshotProject, taskInputSchema, taskMessageLimit, workflowSchema, type Bot, type Project, type Workflow } from '../shared/workflow.ts'
 import { CodexExecutor, detectCodex } from '../runtime/codex.ts'
+import { readWorkspacePreview } from '../runtime/file-preview.ts'
 import { SqliteStore } from '../runtime/store.ts'
 import { WorkflowEngine } from '../runtime/workflow-engine.ts'
 
@@ -106,7 +107,19 @@ else {
       return engine.enqueue(snapshotProject(project, workflow, (id) => store.getBot(id)), { kind: 'manual', objective: input.objective })
     })
     register(channels.cancelTask, (id) => engine.cancel(uuid.parse(id)))
+    register(channels.deleteTask, (id) => engine.deleteTask(uuid.parse(id)))
+    register(channels.previewTaskFile, (id, rawPath) => {
+      const task = store.getTask(uuid.parse(id))
+      const path = z.string().min(1).max(4096).parse(rawPath)
+      if (!task) throw new Error('Task could not be found.')
+      if (!task.attempts.some((attempt) => attempt.result?.files.includes(path))) throw new Error('The file is not in this task’s results.')
+      return readWorkspacePreview(task.project.workspace, path)
+    })
     register(channels.retryTask, (id) => engine.retry(uuid.parse(id)))
+    register(channels.sendFollowUp, (id, text) => {
+      engine.sendFollowUp(uuid.parse(id), z.string().trim().min(1).max(taskMessageLimit).parse(text))
+    })
+    register(channels.completeTask, (id) => engine.completeTask(uuid.parse(id)))
     register(channels.completeHumanStep, (id, accepted, note) => {
       engine.completeHumanStep(uuid.parse(id), z.boolean().parse(accepted), z.string().trim().min(1).max(12_000).parse(note))
     })

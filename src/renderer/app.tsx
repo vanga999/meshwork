@@ -1,15 +1,17 @@
-import { Bot as BotIcon, ChevronRight, CircleDot, Folder, Inbox, Layers3, Network, Play, Plus, Settings, Terminal, X } from 'lucide-react'
+import { Bot as BotIcon, ChevronRight, CircleDot, Folder, Inbox, Layers3, Network, PanelLeftClose, PanelLeftOpen, Play, Plus, Settings, Terminal, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { defaultCodexLabel, type Dashboard, type Task } from '../shared/workflow.ts'
-import { BotEditor, errorMessage, ProjectEditor, TaskEditor, WorkflowEditor } from './forms.tsx'
-import { Status, TaskDetail } from './task.tsx'
+import { canReviewTask, defaultCodexLabel, type Dashboard, type Task } from '../shared/workflow.ts'
+import { BotEditor, DeleteTaskDialog, errorMessage, ProjectEditor, TaskEditor, WorkflowEditor } from './forms.tsx'
+import { TaskDetail, TaskInfoDialog, TaskRow } from './task.tsx'
 
 type Page = 'tasks' | 'projects' | 'bots' | 'settings'
-type Modal = { kind: 'bot' | 'project' | 'workflow'; id?: string } | { kind: 'task'; projectId?: string }
+type Modal = { kind: 'bot' | 'project' | 'workflow'; id?: string } | { kind: 'task'; projectId?: string } | { kind: 'task-info' | 'delete-task'; taskId: string }
 type Filter = 'all' | 'active' | 'done'
 const pageLabels: Record<Page, string> = { tasks: 'Tasks', projects: 'Projects', bots: 'Bots', settings: 'Settings' }
+const navItems = [{ page: 'tasks', Icon: Inbox }, { page: 'projects', Icon: Folder }, { page: 'bots', Icon: BotIcon }, { page: 'settings', Icon: Settings }] as const
+const sidebarStorageKey = 'meshwork.sidebar-collapsed'
 const filters = [{ value: 'all', label: 'All' }, { value: 'active', label: 'In progress' }, { value: 'done', label: 'Finished' }] as const
-const active = (task: Task) => ['queued', 'running', 'waiting'].includes(task.status)
+const active = (task: Task) => canReviewTask(task) || ['queued', 'running', 'waiting'].includes(task.status)
 
 export function App() {
   const [data, setData] = useState<Dashboard>({ bots: [], workflows: [], projects: [], tasks: [], codexPath: '' })
@@ -19,6 +21,7 @@ export function App() {
   const [selected, setSelected] = useState<string>()
   const [error, setError] = useState('')
   const [loaded, setLoaded] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(sidebarStorageKey) === 'true')
 
   useEffect(() => {
     let alive = true
@@ -45,6 +48,7 @@ export function App() {
 
   const visible = data.tasks.filter((task) => filter === 'all' || (filter === 'active' ? active(task) : !active(task)))
   const current = visible.find((task) => task.id === selected) ?? visible[0]
+  const menuTask = modal?.kind === 'task-info' || modal?.kind === 'delete-task' ? data.tasks.find((task) => task.id === modal.taskId) : undefined
   const hasProjects = data.projects.length > 0
   const workflowsById = new Map(data.workflows.map((workflow) => [workflow.id, workflow]))
   const botsById = new Map(data.bots.map((bot) => [bot.id, bot]))
@@ -52,22 +56,29 @@ export function App() {
     if (hasProjects) setModal({ kind: 'task', projectId })
     else setPage('projects')
   }
+  const sidebarAction = sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'
 
-  return <div className="app">
-    <aside className="sidebar">
-      <div className="brand"><span className="brand-icon"><Network size={22} strokeWidth={1.8} /></span><span>Meshwork</span></div>
+  return <div className={`app${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
+    <aside className="sidebar" id="workspace-sidebar">
+      <div className="brand" title="Meshwork"><span className="brand-icon"><Network size={22} strokeWidth={1.8} /></span><span className="sidebar-label">Meshwork</span></div>
       <nav aria-label="Workspace navigation">
-        <button className={page === 'tasks' ? 'selected' : ''} aria-current={page === 'tasks' ? 'page' : undefined} onClick={() => setPage('tasks')}><Inbox size={18} /> Tasks</button>
-        <button className={page === 'projects' ? 'selected' : ''} aria-current={page === 'projects' ? 'page' : undefined} onClick={() => setPage('projects')}><Folder size={18} /> Projects</button>
-        <button className={page === 'bots' ? 'selected' : ''} aria-current={page === 'bots' ? 'page' : undefined} onClick={() => setPage('bots')}><BotIcon size={18} /> Bots</button>
-        <button className={page === 'settings' ? 'selected' : ''} aria-current={page === 'settings' ? 'page' : undefined} onClick={() => setPage('settings')}><Settings size={17} /> Settings</button>
+        {navItems.map(({ page: target, Icon }) => <button key={target} className={page === target ? 'selected' : ''} aria-current={page === target ? 'page' : undefined} aria-label={pageLabels[target]} title={sidebarCollapsed ? pageLabels[target] : undefined} onClick={() => setPage(target)}>
+          <Icon size={18} /><span className="sidebar-label">{pageLabels[target]}</span>
+        </button>)}
       </nav>
-      <div className="local"><CircleDot size={13} /> Local workspace</div>
+      <div className="local" title="Local workspace"><CircleDot size={13} /><span className="sidebar-label">Local workspace</span></div>
     </aside>
 
     <main className="main">
       <header className="topbar">
-        <div className="page-label">{pageLabels[page]}</div>
+        <div className="topbar-heading">
+          <button type="button" className="icon-button" aria-label={sidebarAction} title={sidebarAction} aria-controls="workspace-sidebar" aria-expanded={!sidebarCollapsed} onClick={() => {
+            const next = !sidebarCollapsed
+            setSidebarCollapsed(next)
+            localStorage.setItem(sidebarStorageKey, String(next))
+          }}>{sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</button>
+          <div className="page-label">{pageLabels[page]}</div>
+        </div>
         {page === 'tasks' && hasProjects && <button className="button primary" onClick={() => openTask()}><Plus size={17} /> New task</button>}
         {page === 'projects' && <button className="button primary" onClick={() => setModal({ kind: 'project' })}><Plus size={17} /> New project</button>}
         {page === 'bots' && <div className="actions">
@@ -81,10 +92,8 @@ export function App() {
         <section className="task-list" aria-label="Tasks">
           <div className="segment" aria-label="Filter tasks">{filters.map(({ value, label }) => <button key={value} className={value === filter ? 'selected' : ''} aria-pressed={value === filter} onClick={() => setFilter(value)}>{label}</button>)}</div>
           {visible.length === 0 && <p className="empty-list">{loaded ? 'No tasks to show.' : 'Loading tasks…'}</p>}
-          {visible.map((task) => <button className={`task-row ${task.id === current?.id ? 'selected' : ''}`} key={task.id} onClick={() => setSelected(task.id)}>
-            <div className="task-row-content"><strong>{task.trigger.objective.split('\n')[0]}</strong><span>{task.project.name}</span></div>
-            <Status status={task.approvals.length ? 'waiting' : task.status} />
-          </button>)}
+          {visible.map((task) => <TaskRow key={task.id} task={task} selected={task.id === current?.id} select={() => setSelected(task.id)}
+            showInfo={() => setModal({ kind: 'task-info', taskId: task.id })} remove={() => setModal({ kind: 'delete-task', taskId: task.id })} />)}
         </section>
         <div className="task-pane">
           {current ? <TaskDetail key={current.id} task={current} perform={perform} /> : <div className="empty-state">
@@ -157,6 +166,11 @@ export function App() {
       setFilter('all')
       setModal(undefined)
       setPage('tasks')
+    }} />}
+    {modal?.kind === 'task-info' && menuTask && <TaskInfoDialog task={menuTask} close={() => setModal(undefined)} />}
+    {modal?.kind === 'delete-task' && menuTask && <DeleteTaskDialog title={menuTask.trigger.objective.split('\n')[0]} running={menuTask.status === 'running'} close={() => setModal(undefined)} remove={async () => {
+      await window.meshwork.deleteTask(menuTask.id)
+      setModal(undefined)
     }} />}
   </div>
 }

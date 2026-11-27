@@ -82,9 +82,14 @@ export class CodexExecutor implements StepExecutor {
       await rpc.request('initialize', { clientInfo: { name: 'meshwork', title: 'Meshwork', version: '0.1.0' }, capabilities: null })
       signal.throwIfAborted()
       rpc.notify('initialized')
-      const started = z.object({ thread: z.object({ id: z.string() }) }).parse(await rpc.request('thread/start', {
-        cwd: workspace, sandbox: step.access, approvalPolicy: 'on-request', approvalsReviewer: 'user',
-      }))
+      const settings = { cwd: workspace, sandbox: step.access, approvalPolicy: 'on-request', approvalsReviewer: 'user' }
+      const resumeId = execution.followUp?.threadId
+      const resumed = resumeId ? await rpc.request('thread/resume', { ...settings, threadId: resumeId, excludeTurns: true }).catch((error: Error) => {
+        if (error.message !== `no rollout found for thread id ${resumeId}`) throw error
+        onActivity({ label: 'Starting a new Codex session', detail: 'The earlier session is unavailable. Saved task results are included.' })
+      }) : undefined
+      signal.throwIfAborted()
+      const started = z.object({ thread: z.object({ id: z.string() }) }).parse(resumed ?? await rpc.request('thread/start', settings))
       threadId = started.thread.id
       signal.throwIfAborted()
       execution.onSession({ threadId })
@@ -93,6 +98,7 @@ export class CodexExecutor implements StepExecutor {
         `Task objective:\n${execution.objective}`,
         `Your responsibilities and completion criteria:\n${step.instructions}`,
         `Previous step results (context for this step):\n${JSON.stringify(execution.handoffs)}`,
+        ...(execution.followUp ? [`Latest user follow-up for this task:\n${execution.followUp.text}`] : []),
         'Return an accurate summary, details including any checks and limitations, and an array of relevant file paths relative to the workspace. Use an empty array if there are no files.',
       ].join('\n\n')
       const startedTurn = z.object({ turn: z.object({ id: z.string() }) }).parse(await rpc.request('turn/start', {

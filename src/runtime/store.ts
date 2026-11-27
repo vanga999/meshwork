@@ -15,6 +15,7 @@ export interface WorkflowStore {
   listTasks(): Task[]
   getTask(id: string): Task | undefined
   saveTask(task: Task): void
+  deleteTask(id: string): void
 }
 
 type Table = 'bots' | 'workflows' | 'projects' | 'tasks'
@@ -49,6 +50,7 @@ export class SqliteStore implements WorkflowStore {
   listTasks() { return this.list<Task>('tasks') }
   getTask(id: string) { return this.get<Task>('tasks', id) }
   saveTask(task: Task) { this.save('tasks', task) }
+  deleteTask(id: string) { this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id) }
 
   getSetting(key: string) {
     const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key)

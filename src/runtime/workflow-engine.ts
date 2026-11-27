@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
-import type { Activity, Approval, Attempt, ProjectSnapshot, Step, StepResult, Task, WorkflowTrigger } from '../shared/workflow.ts'
+import { canRetryTask, canReviewTask, defaultCodexStep, type Activity, type Approval, type Attempt, type CodexStep, type ProjectSnapshot, type StepResult, type Task, type TaskMessage, type WorkflowTrigger } from '../shared/workflow.ts'
 import type { WorkflowStore } from './store.ts'
 
 export type Execution = {
   objective: string
   workspace: string
-  step: Extract<Step, { kind: 'codex' }>
+  step: CodexStep
   handoffs: { role: string; result: StepResult }[]
+  followUp?: { text: string; threadId?: string }
   signal: AbortSignal
   onActivity(activity: Omit<Activity, 'at'>): void
   onSession(session: NonNullable<Attempt['provider']>): void
@@ -62,6 +63,23 @@ export class WorkflowEngine {
     return this.requireTask(task.id)
   }
 
+  sendFollowUp(id: string, text: string) {
+    const task = this.requireTask(id)
+    if (!canReviewTask(task)) throw new Error('Wait for the task to be ready for review before sending a follow-up.')
+    task.messages = [...(task.messages ?? []), { id: randomUUID(), text, createdAt: now() }]
+    task.stepIndex = task.project.steps.length
+    task.status = 'queued'
+    this.save(task)
+    this.dispatch()
+  }
+
+  completeTask(id: string) {
+    const task = this.requireTask(id)
+    if (!canReviewTask(task)) throw new Error('The task is not ready to be marked complete.')
+    task.status = 'completed'
+    this.save(task)
+  }
+
   completeHumanStep(id: string, accepted: boolean, note: string) {
     const task = this.requireTask(id)
     if (task.status !== 'waiting') throw new Error('This step no longer needs a decision.')
@@ -89,9 +107,19 @@ export class WorkflowEngine {
     }
   }
 
+  async deleteTask(id: string) {
+    this.requireTask(id)
+    if (this.active?.taskId === id) {
+      this.active.controller.abort()
+      await this.inFlight
+    }
+    this.store.deleteTask(id)
+    this.changed()
+  }
+
   retry(id: string) {
     const task = this.requireTask(id)
-    if (!['failed', 'interrupted', 'cancelled'].includes(task.status)) {
+    if (!canRetryTask(task)) {
       throw new Error('Only stopped work can be retried.')
     }
     task.status = 'queued'
@@ -123,10 +151,13 @@ export class WorkflowEngine {
     const queue = this.store.listTasks().filter((task) => task.status === 'queued')
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
     for (const task of queue) {
-      const step = task.project.steps[task.stepIndex]
+      const followUp = task.stepIndex === task.project.steps.length ? task.messages?.at(-1) : undefined
+      const step = followUp
+        ? task.project.steps.findLast((step) => step.kind === 'codex') ?? defaultCodexStep()
+        : task.project.steps[task.stepIndex]
       const attempt: Attempt = {
         id: randomUUID(), stepIndex: task.stepIndex, status: step.kind === 'human' ? 'waiting' : 'running',
-        startedAt: now(), activity: [],
+        messageId: followUp?.id, startedAt: now(), activity: [],
       }
       task.attempts.push(attempt)
       task.status = attempt.status
@@ -138,19 +169,30 @@ export class WorkflowEngine {
           for (const resolve of active.approvals.values()) resolve(false)
           active.approvals.clear()
         }, { once: true })
-        this.inFlight = this.execute(task, step, active)
+        this.inFlight = this.execute(task, step, active, followUp)
         return
       }
     }
   }
 
-  private async execute(task: Task, step: Extract<Step, { kind: 'codex' }>, active: ActiveExecution) {
+  private async execute(task: Task, step: CodexStep, active: ActiveExecution, followUp?: TaskMessage) {
     const { signal } = active.controller
     try {
-      const handoffs = task.attempts.flatMap((attempt) => attempt.result && attempt.status === 'completed'
+      const handoffs = task.attempts.flatMap((attempt) => !attempt.messageId && attempt.result && attempt.status === 'completed'
         ? [{ role: task.project.steps[attempt.stepIndex].role, result: attempt.result }] : [])
+      let threadId: string | undefined
+      if (followUp) {
+        const previous = task.attempts.findLast((attempt) => attempt.messageId && attempt.result && attempt.status === 'completed')
+        if (previous?.result) handoffs.push({ role: step.role, result: previous.result })
+        const codexIndex = task.project.steps.findLastIndex((step) => step.kind === 'codex')
+        const resumed = task.attempts.findLast((attempt) => attempt.provider?.threadId && (
+          attempt.messageId || (attempt.stepIndex === codexIndex && attempt.status === 'completed')
+        ))
+        threadId = resumed?.provider?.threadId
+      }
       const result = await this.executor.execute({
         objective: task.trigger.objective, workspace: task.project.workspace, step, handoffs, signal,
+        followUp: followUp && { text: followUp.text, threadId },
         onActivity: (activity) => {
           const current = this.requireTask(task.id)
           const attempt = this.currentAttempt(current)
@@ -202,7 +244,7 @@ export class WorkflowEngine {
     const attempt = this.currentAttempt(task)
     attempt.status = 'completed'
     attempt.finishedAt = now()
-    if (task.stepIndex + 1 === task.project.steps.length) task.status = 'completed'
+    if (task.stepIndex >= task.project.steps.length - 1) task.status = 'awaiting-review'
     else {
       task.stepIndex++
       task.status = 'queued'

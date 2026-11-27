@@ -66,7 +66,7 @@ test('snapshots the project, workflow and bot versions and passes results throug
     store.saveWorkflow({ ...workflow, version: 2, steps: workflow.steps.slice(0, 1) })
     store.saveBot({ ...report, version: 2, instructions: 'Updated after the task started' })
     engine.completeHumanStep(task.id, true, 'Verified the checks')
-    const done = await waitFor(task.id, (run) => run.status === 'completed')
+    const done = await waitFor(task.id, (run) => run.status === 'awaiting-review')
     assert.equal(done.project.version, 1)
     assert.deepEqual(done.project.workflow, { id: workflow.id, name: workflow.name, version: 1 })
     assert.deepEqual(done.project.steps[2], { kind: 'codex', role: report.name, instructions: report.instructions, access: report.access, bot: { id: report.id, version: 1 } })
@@ -74,6 +74,8 @@ test('snapshots the project, workflow and bot versions and passes results throug
     assert.deepEqual(results, [[], ['Checks complete', 'Verified the checks']])
     assert.deepEqual(instructions, ['Run local checks\n\nWorkflow step instructions:\nInspect only the readme.', 'Collect the findings'])
     assert.deepEqual(done.attempts[2].result?.files, ['notes.txt'])
+    engine.completeTask(task.id)
+    assert.equal(store.getTask(task.id)?.status, 'completed')
   } finally { await fixture.cleanup() }
 })
 
@@ -93,11 +95,36 @@ test('records approvals and starts a queued task only after execution stops', as
     assert.equal(store.getTask(second.id)?.status, 'queued')
     assert.equal(first.approvals.length, 1)
     engine.answerApproval(first.id, first.approvals[0].id, false)
-    await waitFor(second.id, (run) => run.status === 'completed')
+    await waitFor(second.id, (run) => run.status === 'awaiting-review')
     const complete = store.getTask(first.id)!
-    assert.equal(complete.status, 'completed')
+    assert.equal(complete.status, 'awaiting-review')
     assert.equal(complete.approvals.length, 0)
     assert.equal(complete.attempts[0].activity[0].label, 'Permission declined')
+  } finally { await fixture.cleanup() }
+})
+
+test('deletes queued and running tasks without rerunning them or blocking the queue', async () => {
+  const objectives: string[] = []
+  const fixture = setup({ execute: async ({ objective, requestApproval }) => {
+    objectives.push(objective)
+    if (objective === 'Remove running task') {
+      const accepted = await requestApproval({ title: 'Run a command', detail: 'test' })
+      assert.equal(accepted, false)
+    }
+    return { summary: 'Done', details: '', files: [] }
+  } })
+  try {
+    const { engine, workflow, start, store, waitFor } = fixture
+    store.saveWorkflow({ ...workflow, steps: workflow.steps.slice(0, 1) })
+    const running = start('Remove running task')
+    const queued = start('Remove queued task')
+    const next = start('Keep this task')
+    assert.equal(running.approvals.length, 1)
+    await engine.deleteTask(queued.id)
+    await engine.deleteTask(running.id)
+    await waitFor(next.id, (task) => task.status === 'awaiting-review')
+    assert.deepEqual(objectives, ['Remove running task', 'Keep this task'])
+    assert.deepEqual(store.listTasks().map(({ id }) => id), [next.id])
   } finally { await fixture.cleanup() }
 })
 
@@ -144,8 +171,8 @@ test('reuses one workflow in two projects with different workspaces', async () =
     const first = start('First')
     const secondProject: Project = { ...project, id: 'second-project', workspace: join(project.workspace, 'second') }
     const second = engine.enqueue(snapshotProject(secondProject, shared, (id) => store.getBot(id)), { kind: 'manual', objective: 'Second' })
-    await waitFor(first.id, (run) => run.status === 'completed')
-    await waitFor(second.id, (run) => run.status === 'completed')
+    await waitFor(first.id, (run) => run.status === 'awaiting-review')
+    await waitFor(second.id, (run) => run.status === 'awaiting-review')
     assert.deepEqual(inputs, [
       [project.workspace, 'Run local checks\n\nWorkflow step instructions:\nInspect only the readme.'],
       [secondProject.workspace, 'Run local checks\n\nWorkflow step instructions:\nInspect only the readme.'],
@@ -186,12 +213,58 @@ test('upgrades existing projects and runs a project with no workflow or bot usin
         kind: 'codex', role: 'Default Codex', access: 'workspace-write', instructions: 'Complete the task objective in the project workspace.',
       } }])
       await once(events, 'changed', { signal: AbortSignal.timeout(3000) })
-      assert.equal(store.getTask(task.id)?.status, 'completed')
+      assert.equal(store.getTask(task.id)?.status, 'awaiting-review')
     } finally { await engine.stop(); store.close() }
     const reopened = new SqliteStore(path)
     try { assert.equal(reopened.listWorkflows().length, 1) }
     finally { reopened.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('keeps follow-ups on the task, resumes the Codex session and requires final confirmation', async () => {
+  const executions: unknown[] = []
+  let failed = false
+  const fixture = setup({ execute: async ({ followUp, handoffs, onSession, step }) => {
+    if (!followUp) {
+      onSession({ threadId: 'original-thread', turnId: 'original-turn' })
+      return { summary: 'First result', details: '', files: [] }
+    }
+    executions.push({ followUp, step: step.role, handoffs: handoffs.map(({ result }) => result.summary) })
+    onSession({ threadId: 'original-thread', turnId: 'follow-up-turn' })
+    if (!failed) {
+      failed = true
+      throw new Error('Temporary error')
+    }
+    return { summary: 'Revised result', details: '', files: [] }
+  } })
+  try {
+    const { store, engine, workflow, start, waitFor } = fixture
+    store.saveWorkflow({ ...workflow, steps: workflow.steps.slice(0, 2) })
+    const task = start('Prepare result')
+    assert.throws(() => engine.completeTask(task.id), /not ready/)
+    assert.throws(() => engine.sendFollowUp(task.id, 'Too early'), /ready for review/)
+    await waitFor(task.id, (run) => run.status === 'waiting')
+    engine.completeHumanStep(task.id, true, 'Checked')
+    assert.equal(store.getTask(task.id)?.status, 'awaiting-review')
+    engine.sendFollowUp(task.id, 'Revise the answer')
+    assert.throws(() => engine.completeTask(task.id), /not ready/)
+    const stopped = await waitFor(task.id, (run) => run.status === 'failed')
+    assert.equal(stopped.messages?.length, 1)
+    engine.retry(task.id)
+    await waitFor(task.id, (run) => run.status === 'awaiting-review')
+    engine.sendFollowUp(task.id, 'Check the revision')
+    const ready = await waitFor(task.id, (run) => run.status === 'awaiting-review')
+    assert.deepEqual(executions, [
+      { followUp: { text: 'Revise the answer', threadId: 'original-thread' }, step: 'Analyze', handoffs: ['First result', 'Approved'] },
+      { followUp: { text: 'Revise the answer', threadId: 'original-thread' }, step: 'Analyze', handoffs: ['First result', 'Approved'] },
+      { followUp: { text: 'Check the revision', threadId: 'original-thread' }, step: 'Analyze', handoffs: ['First result', 'Approved', 'Revised result'] },
+    ])
+    assert.deepEqual(ready.attempts.slice(2).map((attempt) => attempt.messageId), [ready.messages![0].id, ready.messages![0].id, ready.messages![1].id])
+    assert.equal(ready.project.steps.length, 2)
+    engine.completeTask(task.id)
+    assert.equal(store.getTask(task.id)?.status, 'completed')
+    assert.throws(() => engine.sendFollowUp(task.id, 'After completion'), /ready for review/)
+  } finally { await fixture.cleanup() }
 })
 
 test('migrates directory-bound bots into projects and preserves existing task results', () => {
@@ -234,7 +307,7 @@ test('migrates directory-bound bots into projects and preserves existing task re
       assert.deepEqual(task.attempts[0].result?.files, ['findings.txt'])
       const engine = new WorkflowEngine(store, { execute: async () => { throw new Error('Unexpected Codex step') } }, () => undefined)
       engine.completeHumanStep(task.id, true, 'Reviewed the existing result')
-      assert.equal(store.getTask(task.id)?.status, 'completed')
+      assert.equal(store.getTask(task.id)?.status, 'awaiting-review')
     } finally { store.close() }
     const reopened = new SqliteStore(path)
     try {

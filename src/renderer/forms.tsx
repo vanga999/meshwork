@@ -6,7 +6,7 @@ export function errorMessage(error: unknown) {
   return (error instanceof Error ? error.message : String(error)).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
 }
 
-function Modal({ title, children, close }: { title: string; children: ReactNode; close(): void }) {
+export function Modal({ title, children, close }: { title: string; children: ReactNode; close(): void }) {
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => { ref.current?.showModal() }, [])
   return <dialog ref={ref} aria-labelledby="modal-title" onCancel={(event) => { event.preventDefault(); close() }}>
@@ -18,7 +18,7 @@ function Modal({ title, children, close }: { title: string; children: ReactNode;
   </dialog>
 }
 
-function DialogForm({ title, action, close, submit, children }: { title: string; action: ReactNode; close(): void; submit(): Promise<void>; children: ReactNode }) {
+function DialogForm({ title, action, close, submit, children, destructive = false }: { title: string; action: ReactNode; close(): void; submit(): Promise<void>; children: ReactNode; destructive?: boolean }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -30,13 +30,19 @@ function DialogForm({ title, action, close, submit, children }: { title: string;
     catch (error) { setError(errorMessage(error)); setBusy(false) }
   }
 
-  return <Modal title={title} close={close}>
+  return <Modal title={title} close={() => { if (!destructive || !busy) close() }}>
     <form className="form" onSubmit={handleSubmit}>
       {children}
       {error && <p className="form-error" role="alert">{error}</p>}
-      <footer className="form-footer"><button type="button" className="button secondary" onClick={close}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{action}</button></footer>
+      <footer className="form-footer"><button type="button" className="button secondary" onClick={close} disabled={destructive && busy} autoFocus={destructive}>Cancel</button><button type="submit" className={`button ${destructive ? 'danger' : 'primary'}`} disabled={busy}>{action}</button></footer>
     </form>
   </Modal>
+}
+
+export function DeleteTaskDialog({ title, running, close, remove }: { title: string; running: boolean; close(): void; remove(): Promise<void> }) {
+  return <DialogForm title="Delete task?" action={<><Trash2 size={15} /> Delete task</>} close={close} submit={remove} destructive>
+    <p className="delete-description">{running ? 'Stop the current run and permanently delete' : 'Permanently delete'} <strong>{title}</strong> and its task history?</p>
+  </DialogForm>
 }
 
 export function BotEditor({ bot, close, save }: { bot?: Bot; close(): void; save(input: BotInput): Promise<void> }) {
