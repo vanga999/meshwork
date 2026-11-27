@@ -2,25 +2,42 @@
 
 [简体中文](README.zh-CN.md) · [Design](docs/design.md)
 
-Meshwork is a planned desktop task workspace for people and AI agents. Create a bot for a recurring kind of work, define the steps it should follow, and give it a task. The bot coordinates handoffs between people and agents, and the task card keeps the decisions, progress, and deliverables together.
+Meshwork is a desktop task workspace for people and AI agents. Define reusable bots, choose a working directory for each project, and arrange bots and people into a project workflow. Start a task in a project and follow the steps, decisions, and deliverables from its task card.
 
-## Personal bots
+## Run the local desktop preview
 
-Create a bot on your desktop to run a workflow over your own projects and files. For example, a development bot can use Codex to inspect a requirement, implement the change, and verify it in separate steps. Meshwork runs Codex on your computer and returns the outcome, changed files, and test results to the task card.
+Install Node.js 24.15 or newer, pnpm, and a recent Codex CLI with App Server support. Sign in with `codex login` if needed. Meshwork runs the installed CLI with your existing sign-in. In Settings you can choose the executable if automatic detection misses it.
 
-## Project bots
+```sh
+pnpm install
+pnpm dev
+```
 
-Create a project for your team, invite people with their own accounts, and manage your repositories, documents, tasks, and deliverables in one place. Project bots belong to the project. Their workflows can assign steps to real teammates or agents and use configurable trigger nodes to start or resume work.
+1. Open **Bots** and select **New bot** to define the bot's role, instructions, and Codex access.
+2. Open **Projects** and select **New project** to choose an existing workspace folder. Add bot and human decision steps in the order you want them to run.
+3. Select **Run task** on the project and enter the objective. Codex results and human decisions appear on its task card.
+
+SQLite stores local data in the Electron user data directory. An interrupted step can be retried from its task card. Meshwork converts older directory-bound bots into projects with reusable bot steps and retains the previous task history.
+
+Use `pnpm build` to build the app, `pnpm start` to launch an existing build, and `pnpm test` to test workflow handoffs and recovery.
+
+## Bots and local projects
+
+One bot can work in several projects. For example, define a code reviewer once, use it in two projects with different folders and review instructions, and add a human acceptance step to either workflow. Each task uses the directory and workflow selected by its project.
+
+## Planned team projects
+
+Create a project for your team, invite people with their own accounts, and manage your repositories, documents, tasks, and deliverables in one place. A team project can own bots and assign workflow steps to a bot or a real teammate. Configurable trigger nodes can start or resume work.
 
 For example, one code review workflow can be triggered by a GitHub pull request or a GitLab merge request across the repositories selected for its trigger. It dispatches a Codex review of the specific revision, saves findings in the project, and can pass the report to a teammate before a separate step publishes it to the source platform. Other workflows can use manual triggers or webhooks for work outside a repository.
 
 ## Where work runs
 
-The desktop app runs personal workflows locally and can execute project steps when its owner enables project access. A headless Meshwork runner can run the same steps on a Linux machine. The team server coordinates project work and shares task context and results across accounts. Codex uses the credentials and workspace on the machine that executes the step.
+The desktop app runs personal workflows locally. In the planned team deployment, an enrolled desktop or headless Linux runner can execute project steps, and the team server coordinates project work and shares context across accounts. Codex uses the credentials and workspace on the machine that executes the step.
 
 ## Status
 
-Meshwork is in the design stage. The proposed first release covers a local personal workflow and a shared code review workflow with a human handoff and configurable event sources. See the [design document](docs/design.md) for the architecture, execution model, and release criteria.
+The initial release focuses on local personal workflows. Team collaboration, external triggers, and the headless Linux runner are later milestones. See the [design document](docs/design.md) for the architecture and release criteria.
 
 ## License
 
