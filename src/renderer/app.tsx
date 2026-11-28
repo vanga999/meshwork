@@ -1,11 +1,12 @@
 import { Bot as BotIcon, ChevronRight, CircleDot, Folder, Inbox, Layers3, Network, PanelLeftClose, PanelLeftOpen, Play, Plus, Settings, Terminal, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { canReviewTask, defaultCodexLabel, type Dashboard, type Task } from '../shared/workflow.ts'
-import { BotEditor, DeleteTaskDialog, errorMessage, ProjectEditor, TaskEditor, WorkflowEditor } from './forms.tsx'
+import { agentDriverNames, agentIdSchema, canReviewTask, defaultAgentLabel, type AgentId, type Dashboard, type Task } from '../shared/workflow.ts'
+import { AgentConnectionEditor, AgentProfileEditor, BotEditor, DeleteTaskDialog, errorMessage, ProjectEditor, TaskEditor } from './forms.tsx'
 import { TaskDetail, TaskInfoDialog, TaskRow } from './task.tsx'
+import { WorkflowEditor } from './workflow-editor.tsx'
 
 type Page = 'tasks' | 'projects' | 'bots' | 'settings'
-type Modal = { kind: 'bot' | 'project' | 'workflow'; id?: string } | { kind: 'task'; projectId?: string } | { kind: 'task-info' | 'delete-task'; taskId: string }
+type Modal = { kind: 'bot' | 'project' | 'workflow'; id?: string } | { kind: 'task'; projectId?: string } | { kind: 'task-info' | 'delete-task'; taskId: string } | { kind: 'agent-connection'; agent: AgentId } | { kind: 'agent-profile'; agent?: AgentId }
 type Filter = 'all' | 'active' | 'done'
 const pageLabels: Record<Page, string> = { tasks: 'Tasks', projects: 'Projects', bots: 'Bots', settings: 'Settings' }
 const navItems = [{ page: 'tasks', Icon: Inbox }, { page: 'projects', Icon: Folder }, { page: 'bots', Icon: BotIcon }, { page: 'settings', Icon: Settings }] as const
@@ -14,7 +15,7 @@ const filters = [{ value: 'all', label: 'All' }, { value: 'active', label: 'In p
 const active = (task: Task) => canReviewTask(task) || ['queued', 'running', 'waiting'].includes(task.status)
 
 export function App() {
-  const [data, setData] = useState<Dashboard>({ bots: [], workflows: [], projects: [], tasks: [], codexPath: '' })
+  const [data, setData] = useState<Dashboard>({ bots: [], workflows: [], projects: [], tasks: [], defaultAgent: 'codex', agents: [] })
   const [page, setPage] = useState<Page>('tasks')
   const [modal, setModal] = useState<Modal>()
   const [filter, setFilter] = useState<Filter>('all')
@@ -49,6 +50,7 @@ export function App() {
   const visible = data.tasks.filter((task) => filter === 'all' || (filter === 'active' ? active(task) : !active(task)))
   const current = visible.find((task) => task.id === selected) ?? visible[0]
   const menuTask = modal?.kind === 'task-info' || modal?.kind === 'delete-task' ? data.tasks.find((task) => task.id === modal.taskId) : undefined
+  const configuredAgent = modal?.kind === 'agent-connection' || modal?.kind === 'agent-profile' ? data.agents.find(({ id }) => id === modal.agent) : undefined
   const hasProjects = data.projects.length > 0
   const workflowsById = new Map(data.workflows.map((workflow) => [workflow.id, workflow]))
   const botsById = new Map(data.bots.map((bot) => [bot.id, bot]))
@@ -85,6 +87,7 @@ export function App() {
           <button className="button secondary" onClick={() => setModal({ kind: 'bot' })}><Plus size={17} /> New bot</button>
           <button className="button primary" onClick={() => setModal({ kind: 'workflow' })}><Plus size={17} /> New workflow</button>
         </div>}
+        {page === 'settings' && <button className="button primary" type="button" onClick={() => setModal({ kind: 'agent-profile' })}><Plus size={17} /> Add agent</button>}
       </header>
       {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={17} /></button></div>}
 
@@ -107,11 +110,11 @@ export function App() {
 
       {page === 'projects' && <section className="content-page" aria-label="Local projects">
         <h1>Local projects</h1>
-        {data.projects.length === 0 && <p className="muted">Choose a workspace folder to run tasks with Codex.</p>}
+        {data.projects.length === 0 && <p className="muted">Choose a workspace folder to run tasks with a coding agent.</p>}
         <div className="bot-grid">{data.projects.map((project) => <article className="bot-card" key={project.id}>
           <div className="bot-card-heading"><span className="bot-icon"><Folder size={19} /></span><h2>{project.name}</h2><span className="muted">v{project.version}</span></div>
           <p className="folder"><Folder size={15} /><code title={project.workspace}>{project.workspace}</code></p>
-          <p className="folder"><Network size={15} /> {project.workflowId ? (workflowsById.get(project.workflowId)?.name ?? 'Unavailable workflow') : defaultCodexLabel}</p>
+          <p className="folder"><Network size={15} /> {project.workflowId ? (workflowsById.get(project.workflowId)?.name ?? 'Unavailable workflow') : defaultAgentLabel}</p>
           <div className="actions"><button className="button secondary" onClick={() => setModal({ kind: 'project', id: project.id })}>Edit project</button><button className="button primary" onClick={() => openTask(project.id)}><Play size={15} /> Run task</button></div>
         </article>)}</div>
       </section>}
@@ -122,7 +125,7 @@ export function App() {
           {data.workflows.length === 0 ? <p className="muted">Create a workflow to reuse its Bot and human steps across projects.</p> : <div className="bot-grid">{data.workflows.map((workflow) => <article className="bot-card" key={workflow.id}>
             <div className="bot-card-heading"><span className="bot-icon"><Network size={19} /></span><h2>{workflow.name}</h2><span className="muted">v{workflow.version}</span></div>
             <ol className="bot-steps">{workflow.steps.map((step, index) => <li key={index}>
-              <span>{index + 1}</span><strong>{step.kind === 'human' ? step.role : step.kind === 'codex' ? defaultCodexLabel : (botsById.get(step.botId)?.name ?? 'Unavailable bot')}</strong>{step.kind === 'human' ? 'Human decision' : 'Codex'}
+              {!workflow.graph && <span>{index + 1}</span>}<strong>{step.kind === 'human' ? step.role : step.kind === 'codex' ? defaultAgentLabel : (botsById.get(step.botId)?.name ?? 'Unavailable bot')}</strong>{step.kind === 'human' ? 'Human decision' : 'Coding agent'}
             </li>)}</ol>
             <div className="actions"><button className="button secondary" onClick={() => setModal({ kind: 'workflow', id: workflow.id })}>Edit workflow</button></div>
           </article>)}</div>}
@@ -132,19 +135,42 @@ export function App() {
           {data.bots.length === 0 ? <p className="muted">Create a bot to reuse its role and instructions in workflows.</p> : <div className="bot-grid">{data.bots.map((bot) => <article className="bot-card" key={bot.id}>
             <div className="bot-card-heading"><span className="bot-icon"><BotIcon size={19} /></span><h2>{bot.name}</h2><span className="muted">v{bot.version}</span></div>
             <p className="bot-description">{bot.instructions}</p>
-            <p className="muted">Codex · {bot.access === 'read-only' ? 'Read only' : 'Workspace writes'}</p>
+            <p className="muted">{bot.access === 'read-only' ? 'Read only' : 'Workspace writes'}</p>
             <div className="actions"><button className="button secondary" onClick={() => setModal({ kind: 'bot', id: bot.id })}>Edit bot</button></div>
           </article>)}</div>}
         </section>
       </div>}
 
-      {page === 'settings' && <section className="content-page" aria-label="Settings">
-        <h1>Local settings</h1>
-        <article className="settings-card"><div className="bot-card-heading"><span className="bot-icon"><Terminal size={19} /></span><h2>Codex CLI</h2></div>
-          <p className="muted">Meshwork uses the installed Codex CLI and its existing sign-in.</p>
-          <p className="runtime-path"><ChevronRight size={16} /><code>{data.codexPath || 'Detecting…'}</code></p>
-          <div className="actions"><button className="button secondary" onClick={() => void perform(window.meshwork.chooseCodex)}>Choose executable</button><button className="button secondary" onClick={() => void perform(window.meshwork.resetCodex)}>Use automatic detection</button></div>
-        </article>
+      {page === 'settings' && <section className="content-page agent-settings" aria-label="Coding agents">
+        <h1>Coding agents</h1>
+        <label className="default-agent-setting">Default for new tasks<select value={data.defaultAgent} onChange={(event) => {
+          const agent = agentIdSchema.parse(event.target.value)
+          void perform(() => window.meshwork.setDefaultAgent(agent))
+        }}>{data.agents.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}</select></label>
+        {data.agents.map((settings) => {
+          const { id, name, driver, builtIn } = settings
+          return <article className="settings-card" key={id} aria-label={name}>
+            <div className="bot-card-heading"><span className="bot-icon"><Terminal size={19} /></span><h2>{name}</h2>
+              {!builtIn && <button className="button secondary" type="button" onClick={() => setModal({ kind: 'agent-profile', agent: id })}>Edit agent</button>}
+            </div>
+            {!builtIn && <p className="muted">{agentDriverNames[driver]}</p>}
+            <div className="agent-setting-row">
+              <div><h3>Executable</h3><p className="runtime-path"><ChevronRight size={16} /><code>{settings.path || (loaded ? 'Not found' : 'Detecting…')}</code></p>
+                {settings.path && !settings.available && <p className="form-error">The configured executable is unavailable.</p>}
+              </div>
+              <div className="actions">
+                <button className="button secondary" onClick={() => void perform(() => window.meshwork.chooseAgentExecutable(id))}>Choose executable</button>
+                {driver !== 'command' && !settings.automatic && <button className="button secondary" onClick={() => void perform(() => window.meshwork.resetAgentExecutable(id))}>Use automatic detection</button>}
+              </div>
+            </div>
+            <div className="agent-setting-row">
+              <div><h3>Model connection</h3><p className="agent-connection-path muted">{settings.baseUrl || 'Use the agent’s own connection'}</p>
+                {(settings.model || settings.hasApiKey) && <p className="muted">{[settings.model, settings.hasApiKey && 'API key saved'].filter(Boolean).join(' · ')}</p>}
+              </div>
+              <button className="button secondary" onClick={() => setModal({ kind: 'agent-connection', agent: id })}>Configure LLM</button>
+            </div>
+          </article>
+        })}
       </section>}
     </main>
 
@@ -160,12 +186,20 @@ export function App() {
       await window.meshwork.saveProject(input, modal.id)
       setModal(undefined)
     }} />}
-    {modal?.kind === 'task' && <TaskEditor projects={data.projects} projectId={modal.projectId} close={() => setModal(undefined)} start={async (input) => {
+    {modal?.kind === 'task' && <TaskEditor projects={data.projects} projectId={modal.projectId} defaultAgent={data.defaultAgent} agents={data.agents} close={() => setModal(undefined)} start={async (input) => {
       const task = await window.meshwork.startTask(input)
       setSelected(task.id)
       setFilter('all')
       setModal(undefined)
       setPage('tasks')
+    }} />}
+    {modal?.kind === 'agent-profile' && <AgentProfileEditor settings={configuredAgent} close={() => setModal(undefined)} save={async (input) => {
+      await window.meshwork.saveAgentProfile(input, modal.agent)
+      setModal(undefined)
+    }} />}
+    {modal?.kind === 'agent-connection' && configuredAgent && <AgentConnectionEditor settings={configuredAgent} close={() => setModal(undefined)} save={async (input) => {
+      await window.meshwork.saveAgentConnection(modal.agent, input)
+      setModal(undefined)
     }} />}
     {modal?.kind === 'task-info' && menuTask && <TaskInfoDialog task={menuTask} close={() => setModal(undefined)} />}
     {modal?.kind === 'delete-task' && menuTask && <DeleteTaskDialog title={menuTask.trigger.objective.split('\n')[0]} running={menuTask.status === 'running'} close={() => setModal(undefined)} remove={async () => {
