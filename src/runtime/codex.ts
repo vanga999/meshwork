@@ -1,35 +1,20 @@
-import { constants, accessSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { delimiter, join } from 'node:path'
 import { z } from 'zod'
 import { resultSchema } from '../shared/workflow.ts'
+import type { AgentEndpoint } from './agent-endpoint.ts'
+import { agentPrompt, agentResultSchema } from './agent-prompt.ts'
 import { CodexRpc, type Message } from './codex-rpc.ts'
 import type { Execution, StepExecutor } from './workflow-engine.ts'
 
 const turnSchema = z.object({ id: z.string(), status: z.string(), error: z.object({ message: z.string() }).nullish() })
-const outputSchema = z.toJSONSchema(resultSchema, { target: 'draft-7' })
-
-export function detectCodex() {
-  const executable = process.platform === 'win32' ? 'codex.exe' : 'codex'
-  const paths = (process.env.PATH ?? '').split(delimiter).filter(Boolean).map((directory) => join(directory, executable))
-  paths.push(join(homedir(), '.local', 'bin', executable), join(homedir(), '.cargo', 'bin', executable))
-  if (process.platform === 'darwin') paths.push(join('/opt/homebrew/bin', executable), join('/usr/local/bin', executable))
-  return paths.find((candidate) => {
-    try {
-      accessSync(candidate, constants.X_OK)
-      return true
-    } catch {
-      return false
-    }
-  }) ?? executable
-}
+const endpointProvider = 'meshwork_endpoint'
+const endpointToken = 'MESHWORK_CODEX_ENDPOINT_TOKEN'
 
 export class CodexExecutor implements StepExecutor {
   private readonly executable: () => string
 
   constructor(executable: () => string) { this.executable = executable }
 
-  async execute(execution: Execution) {
+  async execute(execution: Execution, endpoint?: AgentEndpoint) {
     const { signal, workspace, step, onActivity } = execution
     signal.throwIfAborted()
     const executable = this.executable()
@@ -40,6 +25,18 @@ export class CodexExecutor implements StepExecutor {
     let providerError = ''
     let resolveTurn!: (turn: z.infer<typeof turnSchema>) => void
     const completed = new Promise<z.infer<typeof turnSchema>>((resolve) => { resolveTurn = resolve })
+    const options = endpoint ? {
+      env: { ...process.env, [endpointToken]: endpoint.token },
+      args: Object.entries({
+        model_provider: endpointProvider,
+        [`model_providers.${endpointProvider}.name`]: 'Meshwork endpoint',
+        [`model_providers.${endpointProvider}.base_url`]: endpoint.url,
+        [`model_providers.${endpointProvider}.wire_api`]: 'responses',
+        [`model_providers.${endpointProvider}.env_key`]: endpointToken,
+        [`model_providers.${endpointProvider}.requires_openai_auth`]: false,
+        [`model_providers.${endpointProvider}.supports_websockets`]: false,
+      }).flatMap(([key, value]) => ['--config', `${key}=${JSON.stringify(value)}`]),
+    } : undefined
     const rpc = new CodexRpc(executable, workspace, (message) => {
       const params = message.params ?? {}
       if (message.id !== undefined && message.method) {
@@ -70,7 +67,7 @@ export class CodexExecutor implements StepExecutor {
         }
         if (item.type === 'fileChange') onActivity({ label: 'File changes reported' })
       }
-    })
+    }, options)
 
     let abort!: () => void
     const cancelled = new Promise<never>((_, reject) => {
@@ -82,7 +79,10 @@ export class CodexExecutor implements StepExecutor {
       await rpc.request('initialize', { clientInfo: { name: 'meshwork', title: 'Meshwork', version: '0.1.0' }, capabilities: null })
       signal.throwIfAborted()
       rpc.notify('initialized')
-      const settings = { cwd: workspace, sandbox: step.access, approvalPolicy: 'on-request', approvalsReviewer: 'user' }
+      const settings = {
+        cwd: workspace, sandbox: step.access, approvalPolicy: 'on-request', approvalsReviewer: 'user',
+        model: execution.agent.model, modelProvider: endpoint ? endpointProvider : undefined,
+      }
       const resumeId = execution.followUp?.threadId
       const resumed = resumeId ? await rpc.request('thread/resume', { ...settings, threadId: resumeId, excludeTurns: true }).catch((error: Error) => {
         if (error.message !== `no rollout found for thread id ${resumeId}`) throw error
@@ -93,16 +93,8 @@ export class CodexExecutor implements StepExecutor {
       threadId = started.thread.id
       signal.throwIfAborted()
       execution.onSession({ threadId })
-      const input = [
-        `You are executing the ${step.role} step of a Meshwork workflow.`,
-        `Task objective:\n${execution.objective}`,
-        `Your responsibilities and completion criteria:\n${step.instructions}`,
-        `Previous step results (context for this step):\n${JSON.stringify(execution.handoffs)}`,
-        ...(execution.followUp ? [`Latest user follow-up for this task:\n${execution.followUp.text}`] : []),
-        'Return an accurate summary, details including any checks and limitations, and an array of relevant file paths relative to the workspace. Use an empty array if there are no files.',
-      ].join('\n\n')
       const startedTurn = z.object({ turn: z.object({ id: z.string() }) }).parse(await rpc.request('turn/start', {
-        threadId, input: [{ type: 'text', text: input, text_elements: [] }], outputSchema,
+        threadId, input: [{ type: 'text', text: agentPrompt(execution), text_elements: [] }], outputSchema: agentResultSchema,
       }))
       turnId = startedTurn.turn.id
       signal.throwIfAborted()

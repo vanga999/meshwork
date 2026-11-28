@@ -14,11 +14,14 @@ const api: DesktopApi = {
   deleteTask: (id) => ipcRenderer.invoke(channels.deleteTask, id),
   previewTaskFile: (taskId, path) => ipcRenderer.invoke(channels.previewTaskFile, taskId, path),
   retryTask: (id) => ipcRenderer.invoke(channels.retryTask, id),
-  completeHumanStep: (id, accepted, note) => ipcRenderer.invoke(channels.completeHumanStep, id, accepted, note),
+  completeHumanStep: (id, accepted, note, stepIndex) => ipcRenderer.invoke(channels.completeHumanStep, id, accepted, note, stepIndex),
   answerApproval: (taskId, approvalId, accepted) => ipcRenderer.invoke(channels.answerApproval, taskId, approvalId, accepted),
   chooseWorkspace: () => ipcRenderer.invoke(channels.chooseWorkspace),
-  chooseCodex: () => ipcRenderer.invoke(channels.chooseCodex),
-  resetCodex: () => ipcRenderer.invoke(channels.resetCodex),
+  chooseAgentExecutable: (agent) => ipcRenderer.invoke(channels.chooseAgentExecutable, agent),
+  saveAgentProfile: (input, id) => ipcRenderer.invoke(channels.saveAgentProfile, input, id),
+  resetAgentExecutable: (agent) => ipcRenderer.invoke(channels.resetAgentExecutable, agent),
+  saveAgentConnection: (agent, input) => ipcRenderer.invoke(channels.saveAgentConnection, agent, input),
+  setDefaultAgent: (agent) => ipcRenderer.invoke(channels.setDefaultAgent, agent),
   subscribe(listener) {
     const callback = () => listener()
     ipcRenderer.on(channels.changed, callback)

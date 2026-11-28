@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
-import { snapshotProject, type Bot, type Project, type Task, type Workflow } from '../src/shared/workflow.ts'
+import { snapshotProject, workflowSchema, type Bot, type Project, type ProjectSnapshot, type Task, type Workflow } from '../src/shared/workflow.ts'
 import { SqliteStore } from '../src/runtime/store.ts'
 import { WorkflowEngine, type StepExecutor } from '../src/runtime/workflow-engine.ts'
 
@@ -126,6 +126,108 @@ test('deletes queued and running tasks without rerunning them or blocking the qu
     assert.deepEqual(objectives, ['Remove running task', 'Keep this task'])
     assert.deepEqual(store.listTasks().map(({ id }) => id), [next.id])
   } finally { await fixture.cleanup() }
+})
+
+function diamondProject(project: Project): ProjectSnapshot {
+  return {
+    ...project,
+    steps: ['Start', 'Left', 'Right', 'Join'].map((role) => ({ kind: 'codex', role, access: 'read-only', instructions: role })),
+    graph: {
+      positions: [{ x: 24, y: 100 }, { x: 264, y: 32 }, { x: 264, y: 160 }, { x: 504, y: 100 }],
+      links: [{ from: 0, to: 1 }, { from: 0, to: 2 }, { from: 1, to: 3 }, { from: 2, to: 3 }],
+    },
+  }
+}
+
+test('runs independent nodes together and waits for every branch result at the join', async () => {
+  const calls: [string, string[]][] = []
+  const fixture = setup({ execute: async ({ step, handoffs, requestApproval }) => {
+    calls.push([step.role, handoffs.map(({ result }) => result.summary)])
+    if (step.role === 'Left' || step.role === 'Right') {
+      assert.equal(await requestApproval({ title: step.role, detail: 'Branch approval' }), true)
+    }
+    return { summary: step.role, details: '', files: [] }
+  } })
+  try {
+    const { project, engine, waitFor } = fixture
+    const started = engine.enqueue(diamondProject(project), { kind: 'manual', objective: 'Parallel review' })
+    const waiting = await waitFor(started.id, (task) => task.approvals.length === 2)
+    const [left, right] = waiting.approvals
+    assert.deepEqual([left.stepIndex, right.stepIndex], [1, 2])
+    assert.deepEqual(calls, [['Start', []], ['Left', ['Start']], ['Right', ['Start']]])
+    engine.answerApproval(started.id, left.id, true)
+    const partial = await waitFor(started.id, (task) => task.attempts.some((attempt) => attempt.stepIndex === 1 && attempt.status === 'completed'))
+    assert.deepEqual(partial.approvals.map(({ id }) => id), [right.id])
+    assert.equal(partial.attempts.some((attempt) => attempt.stepIndex === 3), false)
+    engine.answerApproval(started.id, right.id, true)
+    await waitFor(started.id, (task) => task.status === 'awaiting-review')
+    assert.deepEqual(calls.at(-1), ['Join', ['Start', 'Left', 'Right']])
+  } finally { await fixture.cleanup() }
+})
+
+test('retries a failed branch without repeating completed inputs', async () => {
+  const calls: string[] = []
+  const fixture = setup({ execute: async ({ step }) => {
+    calls.push(step.role)
+    if (step.role === 'Right' && calls.filter((role) => role === 'Right').length === 1) throw new Error('Try again')
+    return { summary: step.role, details: '', files: [] }
+  } })
+  try {
+    const { project, engine, waitFor } = fixture
+    const started = engine.enqueue(diamondProject(project), { kind: 'manual', objective: 'Recover the branch' })
+    await waitFor(started.id, (task) => task.status === 'failed')
+    assert.deepEqual(calls, ['Start', 'Left', 'Right'])
+    engine.retry(started.id)
+    await waitFor(started.id, (task) => task.status === 'awaiting-review')
+    assert.deepEqual(calls, ['Start', 'Left', 'Right', 'Right', 'Join'])
+  } finally { await fixture.cleanup() }
+})
+
+test('keeps parallel human decisions independent and interruption recovery preserves finished branches', async () => {
+  const calls: string[] = []
+  const fixture = setup({ execute: async ({ step, signal }) => {
+    calls.push(step.role)
+    if (step.role === 'Join') await new Promise<void>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+    return { summary: step.role, details: '', files: [] }
+  } })
+  try {
+    const { project, engine, store, waitFor } = fixture
+    const graph = diamondProject(project)
+    graph.steps[1] = { kind: 'human', role: 'Left reviewer', instructions: 'Review the left branch' }
+    graph.steps[2] = { kind: 'human', role: 'Right reviewer', instructions: 'Review the right branch' }
+    const started = engine.enqueue(graph, { kind: 'manual', objective: 'Review independently' })
+    await waitFor(started.id, (task) => task.attempts.filter(({ status }) => status === 'waiting').length === 2)
+    engine.completeHumanStep(started.id, true, 'Reviewed right', 2)
+    assert.deepEqual(calls, ['Start'])
+    engine.completeHumanStep(started.id, true, 'Reviewed left', 1)
+    assert.deepEqual(calls, ['Start', 'Join'])
+    await engine.stop()
+    const recovered = new WorkflowEngine(store, { execute: async ({ step, handoffs }) => {
+      calls.push(step.role)
+      assert.deepEqual(handoffs.map(({ result }) => result.details), ['', 'Reviewed left', 'Reviewed right'])
+      return { summary: step.role, details: '', files: [] }
+    } }, () => undefined)
+    try {
+      recovered.start()
+      assert.equal(store.getTask(started.id)?.status, 'interrupted')
+      recovered.retry(started.id)
+      assert.deepEqual(calls, ['Start', 'Join', 'Join'])
+    } finally { await recovered.stop() }
+  } finally { await fixture.cleanup() }
+})
+
+test('accepts a fork and rejects circular, duplicated and out-of-range graph connections', () => {
+  const workflow = {
+    name: 'Review',
+    steps: Array.from({ length: 3 }, () => ({ kind: 'codex', instructions: '' })),
+    graph: { positions: [{ x: 24, y: 100 }, { x: 264, y: 32 }, { x: 264, y: 160 }], links: [{ from: 0, to: 1 }, { from: 0, to: 2 }] },
+  }
+  assert.equal(workflowSchema.safeParse(workflow).success, true)
+  for (const link of [{ from: 2, to: 0 }, { from: 0, to: 1 }, { from: 3, to: 1 }]) {
+    assert.equal(workflowSchema.safeParse({ ...workflow, graph: { ...workflow.graph, links: [...workflow.graph.links, link] } }).success, false)
+  }
 })
 
 test('keeps interrupted work visible and waits for an explicit retry after restart', async () => {
@@ -264,6 +366,29 @@ test('keeps follow-ups on the task, resumes the Codex session and requires final
     engine.completeTask(task.id)
     assert.equal(store.getTask(task.id)?.status, 'completed')
     assert.throws(() => engine.sendFollowUp(task.id, 'After completion'), /ready for review/)
+  } finally { await fixture.cleanup() }
+})
+
+test('an agent and its endpoint remain selected for a task after restarting the engine', async () => {
+  const seen: unknown[] = []
+  const executor: StepExecutor = { execute: async ({ agent, step }) => {
+    seen.push([agent, step.role])
+    return { summary: 'Done', details: '', files: [] }
+  } }
+  const fixture = setup(executor)
+  try {
+    const { project, engine, store, waitFor } = fixture
+    const selection = { id: 'claude', baseUrl: 'https://models.example', model: 'workspace-agent' } as const
+    const snapshot = snapshotProject({ ...project, workflowId: undefined }, undefined, (id) => store.getBot(id), selection)
+    const task = engine.enqueue(snapshot, { kind: 'manual', objective: 'Review' }, selection)
+    await waitFor(task.id, (run) => run.status === 'awaiting-review')
+    await engine.stop()
+    const resumed = new WorkflowEngine(store, executor, () => undefined)
+    try {
+      resumed.start()
+      resumed.sendFollowUp(task.id, 'Check again')
+      assert.deepEqual(seen, [[selection, 'Default Claude Code'], [selection, 'Default Claude Code']])
+    } finally { await resumed.stop() }
   } finally { await fixture.cleanup() }
 })
 

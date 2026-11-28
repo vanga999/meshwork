@@ -23,9 +23,9 @@ export class CodexRpc {
   private closing = false
   readonly exited: Promise<Error>
 
-  constructor(executable: string, workspace: string, receive: (message: Message) => void) {
-    this.child = spawn(executable, ['app-server', '--listen', 'stdio://'], {
-      cwd: workspace, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+  constructor(executable: string, workspace: string, receive: (message: Message) => void, options?: { args: string[]; env: NodeJS.ProcessEnv }) {
+    this.child = spawn(executable, ['app-server', '--listen', 'stdio://', ...(options?.args ?? [])], {
+      cwd: workspace, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: options?.env,
     })
     this.exited = new Promise((resolve) => {
       this.child.once('error', (error) => resolve(this.fail(new Error(`Could not start Codex from ${executable}. ${error.message}`))))

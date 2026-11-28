@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto'
-import { canRetryTask, canReviewTask, defaultCodexStep, type Activity, type Approval, type Attempt, type CodexStep, type ProjectSnapshot, type StepResult, type Task, type TaskMessage, type WorkflowTrigger } from '../shared/workflow.ts'
+import { canRetryTask, canReviewTask, defaultAgentStep, type Activity, type AgentSelection, type AgentStep, type Approval, type Attempt, type ProjectSnapshot, type StepResult, type Task, type TaskMessage, type WorkflowTrigger } from '../shared/workflow.ts'
+import { workflowAncestors, workflowDependencies, workflowGraphError, workflowLinks } from '../shared/workflow-graph.ts'
 import type { WorkflowStore } from './store.ts'
 
 export type Execution = {
   objective: string
   workspace: string
-  step: CodexStep
+  agent: AgentSelection
+  step: AgentStep
   handoffs: { role: string; result: StepResult }[]
   followUp?: { text: string; threadId?: string }
   signal: AbortSignal
@@ -20,18 +22,33 @@ export interface StepExecutor {
 
 type ActiveExecution = {
   taskId: string
+  attempt: Attempt
   controller: AbortController
   approvals: Map<string, (accepted: boolean) => void>
+  done?: Promise<void>
 }
 
 const now = () => new Date().toISOString()
+const stoppedStep = (attempt: Attempt) => ['failed', 'interrupted', 'cancelled'].includes(attempt.status)
+const workflowStatuses = new Set(['queued', 'running', 'waiting'])
+
+function latestSteps(task: Task) {
+  const latest = Array.from({ length: task.project.steps.length }, (): Attempt | undefined => undefined)
+  for (const attempt of task.attempts) {
+    if (!attempt.messageId) latest[attempt.stepIndex] = attempt
+  }
+  return latest
+}
+
+function dependenciesFor(task: Task) {
+  return workflowDependencies(task.project.steps.length, workflowLinks(task.project.steps.length, task.project.graph))
+}
 
 export class WorkflowEngine {
   private readonly store: WorkflowStore
   private readonly executor: StepExecutor
   private readonly changed: () => void
-  private active?: ActiveExecution
-  private inFlight?: Promise<void>
+  private readonly active = new Map<string, ActiveExecution>()
   private stopped = false
 
   constructor(store: WorkflowStore, executor: StepExecutor, changed: () => void) {
@@ -43,20 +60,27 @@ export class WorkflowEngine {
   start() {
     for (const task of this.store.listTasks()) {
       if (task.status !== 'running') continue
-      const attempt = this.currentAttempt(task)
-      attempt.error = 'Meshwork closed during this step. Check the workspace before retrying.'
+      for (const attempt of task.attempts) {
+        if (attempt.status !== 'running') continue
+        attempt.error = 'Meshwork closed during this step. Check the workspace before retrying.'
+        this.finish(attempt, 'interrupted')
+      }
       task.approvals = []
-      this.finish(task, 'interrupted')
+      task.retrySteps = undefined
+      this.updateStatus(task)
+      this.save(task)
     }
     this.dispatch()
   }
 
-  enqueue(project: ProjectSnapshot, trigger: WorkflowTrigger) {
+  enqueue(project: ProjectSnapshot, trigger: WorkflowTrigger, agent: AgentSelection = { id: 'codex' }) {
     if (!project.steps.length) throw new Error('Add a workflow step before starting a task.')
+    const invalid = project.graph && workflowGraphError(project.steps.length, project.graph.links)
+    if (invalid) throw new Error(invalid)
     const createdAt = now()
     const task: Task = {
       id: randomUUID(), project: structuredClone(project), trigger, status: 'queued', stepIndex: 0,
-      attempts: [], approvals: [], createdAt, updatedAt: createdAt,
+      attempts: [], approvals: [], agent, createdAt, updatedAt: createdAt,
     }
     this.save(task)
     this.dispatch()
@@ -80,48 +104,45 @@ export class WorkflowEngine {
     this.save(task)
   }
 
-  completeHumanStep(id: string, accepted: boolean, note: string) {
+  completeHumanStep(id: string, accepted: boolean, note: string, stepIndex?: number) {
     const task = this.requireTask(id)
-    if (task.status !== 'waiting') throw new Error('This step no longer needs a decision.')
-    const attempt = this.currentAttempt(task)
-    if (accepted) {
-      attempt.result = { summary: 'Approved', details: note, files: [] }
-      this.advance(task)
-    } else {
-      attempt.error = note
-      this.finish(task, 'failed')
+    const index = stepIndex ?? task.stepIndex
+    const attempt = latestSteps(task)[index]
+    if (attempt?.status !== 'waiting' || task.project.steps[index]?.kind !== 'human') {
+      throw new Error('This step no longer needs a decision.')
     }
+    if (accepted) attempt.result = { summary: 'Approved', details: note, files: [] }
+    else attempt.error = note
+    this.finish(attempt, accepted ? 'completed' : 'failed')
+    this.updateStatus(task)
+    this.save(task)
     this.dispatch()
   }
 
   cancel(id: string) {
     const task = this.requireTask(id)
-    if (task.status === 'running') {
-      if (this.active?.taskId === id) this.active.controller.abort()
-      return
-    }
-    if (task.status === 'waiting') this.finish(task, 'cancelled')
-    if (task.status === 'queued') {
-      task.status = 'cancelled'
-      this.save(task)
-    }
+    const waiting = latestSteps(task).filter((attempt) => attempt?.status === 'waiting')
+    if (!workflowStatuses.has(task.status) && !waiting.length) return
+    for (const attempt of waiting) if (attempt) this.finish(attempt, 'cancelled')
+    task.retrySteps = undefined
+    const running = this.runsFor(id)
+    if (!running.length) task.status = 'cancelled'
+    this.save(task)
+    for (const run of running) run.controller.abort()
   }
 
   async deleteTask(id: string) {
-    this.requireTask(id)
-    if (this.active?.taskId === id) {
-      this.active.controller.abort()
-      await this.inFlight
-    }
+    const running = this.runsFor(id)
+    this.cancel(id)
+    await Promise.all(running.map((run) => run.done))
     this.store.deleteTask(id)
     this.changed()
   }
 
   retry(id: string) {
     const task = this.requireTask(id)
-    if (!canRetryTask(task)) {
-      throw new Error('Only stopped work can be retried.')
-    }
+    if (!canRetryTask(task)) throw new Error('Only stopped work can be retried.')
+    if (task.stepIndex < task.project.steps.length) task.retrySteps = latestSteps(task).flatMap((attempt, index) => attempt && stoppedStep(attempt) ? [index] : [])
     task.status = 'queued'
     this.save(task)
     this.dispatch()
@@ -129,79 +150,121 @@ export class WorkflowEngine {
 
   answerApproval(taskId: string, approvalId: string, accepted: boolean) {
     const task = this.requireTask(taskId)
-    const active = this.active
-    const respond = active?.taskId === taskId ? active.approvals.get(approvalId) : undefined
+    const run = this.runsFor(taskId).find((item) => item.approvals.has(approvalId))
     const approval = task.approvals.find((item) => item.id === approvalId)
-    if (!respond || !active || !approval) throw new Error('This permission request has expired.')
-    active.approvals.delete(approvalId)
+    if (!run || !approval) throw new Error('This permission request has expired.')
+    const respond = run.approvals.get(approvalId)!
+    run.approvals.delete(approvalId)
     task.approvals = task.approvals.filter((item) => item.id !== approvalId)
-    this.currentAttempt(task).activity.push({ at: now(), label: accepted ? 'Permission allowed once' : 'Permission declined', detail: approval.title })
+    this.attemptFor(task, run).activity.push({ at: now(), label: accepted ? 'Permission allowed once' : 'Permission declined', detail: approval.title })
     this.save(task)
     respond(accepted)
   }
 
   stop() {
     this.stopped = true
-    this.active?.controller.abort()
-    return this.inFlight
+    const running = [...this.active.values()]
+    for (const run of running) run.controller.abort()
+    return Promise.all(running.map((run) => run.done))
+  }
+
+  private runsFor(taskId: string) {
+    return [...this.active.values()].filter((run) => run.taskId === taskId)
   }
 
   private dispatch() {
-    if (this.stopped || this.active) return
-    const queue = this.store.listTasks().filter((task) => task.status === 'queued')
+    if (this.stopped) return
+    const running = [...this.active.values()]
+    if (running.length) {
+      if (running.every((run) => !run.controller.signal.aborted)) this.schedule(this.requireTask(running[0].taskId))
+      return
+    }
+    const queue = this.store.listTasks().filter((task) => workflowStatuses.has(task.status))
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
     for (const task of queue) {
-      const followUp = task.stepIndex === task.project.steps.length ? task.messages?.at(-1) : undefined
-      const step = followUp
-        ? task.project.steps.findLast((step) => step.kind === 'codex') ?? defaultCodexStep()
-        : task.project.steps[task.stepIndex]
-      const attempt: Attempt = {
-        id: randomUUID(), stepIndex: task.stepIndex, status: step.kind === 'human' ? 'waiting' : 'running',
-        messageId: followUp?.id, startedAt: now(), activity: [],
-      }
-      task.attempts.push(attempt)
-      task.status = attempt.status
-      this.save(task)
-      if (step.kind === 'codex') {
-        const active = { taskId: task.id, controller: new AbortController(), approvals: new Map<string, (accepted: boolean) => void>() }
-        this.active = active
-        active.controller.signal.addEventListener('abort', () => {
-          for (const resolve of active.approvals.values()) resolve(false)
-          active.approvals.clear()
-        }, { once: true })
-        this.inFlight = this.execute(task, step, active, followUp)
-        return
-      }
+      this.schedule(task)
+      if (this.active.size) return
     }
   }
 
-  private async execute(task: Task, step: CodexStep, active: ActiveExecution, followUp?: TaskMessage) {
-    const { signal } = active.controller
+  private schedule(task: Task) {
+    const length = task.project.steps.length
+    const followUp = task.stepIndex === length ? task.messages?.at(-1) : undefined
+    let ready: number[]
+    if (followUp) {
+      if (task.status !== 'queued') return
+      ready = [length]
+    } else {
+      const latest = latestSteps(task)
+      const retries = new Set(task.retrySteps)
+      if (latest.some((attempt, index) => attempt && stoppedStep(attempt) && !retries.has(index))) return
+      ready = dependenciesFor(task).flatMap((upstream, index) =>
+        (!latest[index] || retries.has(index)) && upstream.every((parent) => latest[parent]?.status === 'completed') ? [index] : [])
+    }
+    if (!ready.length) return
+
+    const launches: { run: ActiveExecution; step: AgentStep }[] = []
+    for (const index of ready) {
+      const step = followUp
+        ? this.followUpStep(task) ?? defaultAgentStep(task.agent)
+        : task.project.steps[index]
+      const attempt: Attempt = {
+        id: randomUUID(), stepIndex: index, status: step.kind === 'human' ? 'waiting' : 'running',
+        messageId: followUp?.id, startedAt: now(), activity: [],
+      }
+      task.attempts.push(attempt)
+      if (step.kind === 'codex') {
+        const run: ActiveExecution = { taskId: task.id, attempt, controller: new AbortController(), approvals: new Map() }
+        run.controller.signal.addEventListener('abort', () => {
+          for (const resolve of run.approvals.values()) resolve(false)
+          run.approvals.clear()
+        }, { once: true })
+        this.active.set(attempt.id, run)
+        launches.push({ run, step })
+      }
+    }
+    const remaining = task.retrySteps?.filter((index) => !ready.includes(index))
+    task.retrySteps = remaining?.length ? remaining : undefined
+    this.updateStatus(task)
+    this.save(task)
+    for (const { run, step } of launches) run.done = this.execute(task, step, run, followUp)
+  }
+
+  private followUpStep(task: Task) {
+    const prior = task.attempts.findLast((attempt) => attempt.status === 'completed' && !attempt.messageId && task.project.steps[attempt.stepIndex]?.kind === 'codex')
+    const step = prior && task.project.steps[prior.stepIndex]
+    return step?.kind === 'codex' ? step : undefined
+  }
+
+  private async execute(task: Task, step: AgentStep, run: ActiveExecution, followUp?: TaskMessage) {
+    const { signal } = run.controller
     try {
+      const ancestors = followUp ? undefined : workflowAncestors(run.attempt.stepIndex, dependenciesFor(task))
       const handoffs = task.attempts.flatMap((attempt) => !attempt.messageId && attempt.result && attempt.status === 'completed'
+        && (!ancestors || ancestors.has(attempt.stepIndex))
         ? [{ role: task.project.steps[attempt.stepIndex].role, result: attempt.result }] : [])
       let threadId: string | undefined
       if (followUp) {
         const previous = task.attempts.findLast((attempt) => attempt.messageId && attempt.result && attempt.status === 'completed')
         if (previous?.result) handoffs.push({ role: step.role, result: previous.result })
-        const codexIndex = task.project.steps.findLastIndex((step) => step.kind === 'codex')
+        const index = task.project.steps.indexOf(step)
         const resumed = task.attempts.findLast((attempt) => attempt.provider?.threadId && (
-          attempt.messageId || (attempt.stepIndex === codexIndex && attempt.status === 'completed')
+          attempt.messageId || (attempt.stepIndex === index && attempt.status === 'completed')
         ))
         threadId = resumed?.provider?.threadId
       }
       const result = await this.executor.execute({
-        objective: task.trigger.objective, workspace: task.project.workspace, step, handoffs, signal,
+        objective: task.trigger.objective, workspace: task.project.workspace, agent: task.agent ?? { id: 'codex' }, step, handoffs, signal,
         followUp: followUp && { text: followUp.text, threadId },
         onActivity: (activity) => {
           const current = this.requireTask(task.id)
-          const attempt = this.currentAttempt(current)
+          const attempt = this.attemptFor(current, run)
           attempt.activity = [...attempt.activity.slice(-79), { at: now(), ...activity }]
           this.save(current)
         },
         onSession: (session) => {
           const current = this.requireTask(task.id)
-          this.currentAttempt(current).provider = session
+          this.attemptFor(current, run).provider = session
           this.save(current)
         },
         requestApproval: (approval) => {
@@ -209,60 +272,66 @@ export class WorkflowEngine {
           const current = this.requireTask(task.id)
           const id = randomUUID()
           return new Promise((resolve) => {
-            active.approvals.set(id, resolve)
-            current.approvals.push({ ...approval, id })
+            run.approvals.set(id, resolve)
+            current.approvals.push({ ...approval, id, stepIndex: run.attempt.stepIndex })
             this.save(current)
           })
         },
       })
-      if (this.stopped) return
-      const current = this.requireTask(task.id)
-      current.approvals = []
-      if (signal.aborted) {
-        this.finish(current, 'cancelled')
-      } else {
-        this.currentAttempt(current).result = result
-        this.advance(current)
-      }
+      if (!this.stopped) this.settle(run, signal.aborted ? 'cancelled' : 'completed', result)
     } catch (error) {
-      if (this.stopped) return
-      const current = this.requireTask(task.id)
-      current.approvals = []
-      if (signal.aborted) this.finish(current, 'cancelled')
-      else {
-        this.currentAttempt(current).error = error instanceof Error ? error.message : String(error)
-        this.finish(current, 'failed')
-      }
+      // A synchronous executor failure must settle after the dispatch loop has registered every launch.
+      await Promise.resolve()
+      if (!this.stopped) this.settle(run, signal.aborted ? 'cancelled' : 'failed', undefined, error instanceof Error ? error.message : String(error))
     } finally {
-      for (const resolve of active.approvals.values()) resolve(false)
-      this.active = undefined
+      for (const resolve of run.approvals.values()) resolve(false)
+      this.active.delete(run.attempt.id)
       this.dispatch()
     }
   }
 
-  private advance(task: Task) {
-    const attempt = this.currentAttempt(task)
-    attempt.status = 'completed'
-    attempt.finishedAt = now()
-    if (task.stepIndex >= task.project.steps.length - 1) task.status = 'awaiting-review'
-    else {
-      task.stepIndex++
-      task.status = 'queued'
-    }
+  private settle(run: ActiveExecution, status: 'completed' | 'failed' | 'cancelled', result?: StepResult, error?: string) {
+    const task = this.requireTask(run.taskId)
+    const attempt = this.attemptFor(task, run)
+    task.approvals = task.approvals.filter((approval) => approval.stepIndex !== attempt.stepIndex)
+    if (status === 'completed') attempt.result = result
+    if (status === 'failed') attempt.error = error
+    this.finish(attempt, status)
+    this.updateStatus(task)
     this.save(task)
   }
 
-  private finish(task: Task, status: 'failed' | 'interrupted' | 'cancelled') {
-    const attempt = this.currentAttempt(task)
+  private updateStatus(task: Task) {
+    if (task.stepIndex === task.project.steps.length) {
+      const status = task.attempts.at(-1)?.status
+      if (status) task.status = status === 'completed' ? 'awaiting-review' : status
+      return
+    }
+    const attempts = latestSteps(task)
+    const active = attempts.find((attempt) => attempt?.status === 'running')
+    const cancelled = attempts.find((attempt) => attempt?.status === 'cancelled')
+    const stopped = cancelled ?? attempts.find((attempt) => attempt && stoppedStep(attempt))
+    const waiting = attempts.find((attempt) => attempt?.status === 'waiting')
+    const next = active ?? (task.retrySteps?.length ? undefined : stopped ?? waiting)
+    if (next) {
+      task.status = next.status
+      task.stepIndex = next.stepIndex
+    } else if (attempts.every((attempt) => attempt?.status === 'completed')) {
+      task.status = 'awaiting-review'
+    } else {
+      task.status = 'queued'
+      task.stepIndex = task.retrySteps?.[0] ?? attempts.findIndex((attempt) => !attempt)
+    }
+  }
+
+  private finish(attempt: Attempt, status: 'completed' | 'failed' | 'interrupted' | 'cancelled') {
     attempt.status = status
     attempt.finishedAt = now()
-    task.status = status
-    this.save(task)
   }
 
-  private currentAttempt(task: Task) {
-    const attempt = task.attempts.at(-1)
-    if (!attempt || attempt.stepIndex !== task.stepIndex) throw new Error('Step execution could not be found.')
+  private attemptFor(task: Task, run: ActiveExecution) {
+    const attempt = task.attempts.find(({ id }) => id === run.attempt.id)
+    if (!attempt) throw new Error('Step execution could not be found.')
     return attempt
   }
 

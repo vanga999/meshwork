@@ -13,7 +13,10 @@ export const channels = {
   completeHumanStep: 'meshwork:complete-human-step',
   answerApproval: 'meshwork:answer-approval',
   chooseWorkspace: 'meshwork:choose-workspace',
-  chooseCodex: 'meshwork:choose-codex',
-  resetCodex: 'meshwork:reset-codex',
+  chooseAgentExecutable: 'meshwork:choose-agent-executable',
+  saveAgentProfile: 'meshwork:save-agent-profile',
+  resetAgentExecutable: 'meshwork:reset-agent-executable',
+  saveAgentConnection: 'meshwork:save-agent-connection',
+  setDefaultAgent: 'meshwork:set-default-agent',
   changed: 'meshwork:changed',
 } as const

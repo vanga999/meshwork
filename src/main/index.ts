@@ -2,18 +2,21 @@ import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron'
 import { z } from 'zod'
 import { channels } from '../shared/channels.ts'
-import { botSchema, projectSchema, resolveWorkflowSteps, snapshotProject, taskInputSchema, taskMessageLimit, workflowSchema, type Bot, type Project, type Workflow } from '../shared/workflow.ts'
-import { CodexExecutor, detectCodex } from '../runtime/codex.ts'
+import { agentDriver, agentIdSchema, botSchema, projectSchema, resolveWorkflowSteps, snapshotProject, taskInputSchema, taskMessageLimit, workflowSchema, type Bot, type Project, type Workflow } from '../shared/workflow.ts'
+import { withAgentEndpoint } from '../runtime/agent-endpoint.ts'
+import { AgentSettingsStore } from '../runtime/agent-settings.ts'
+import { ClaudeExecutor } from '../runtime/claude.ts'
+import { CodexExecutor } from '../runtime/codex.ts'
+import { CommandExecutor } from '../runtime/command-agent.ts'
 import { readWorkspacePreview } from '../runtime/file-preview.ts'
 import { SqliteStore } from '../runtime/store.ts'
 import { WorkflowEngine } from '../runtime/workflow-engine.ts'
 
 const entry = join(__dirname, '../renderer/index.html')
 const entryUrl = pathToFileURL(entry).href
-const codexSetting = 'codex-path'
 let window: BrowserWindow | undefined
 
 function showWindow() {
@@ -53,14 +56,30 @@ else {
 
   void app.whenReady().then(() => {
     const store = new SqliteStore(join(app.getPath('userData'), 'meshwork.sqlite'))
-    const codex = () => store.getSetting(codexSetting) || detectCodex()
+    const settings = new AgentSettingsStore(store, {
+      encrypt(value) {
+        if (!safeStorage.isEncryptionAvailable() || (process.platform === 'linux' && safeStorage.getSelectedStorageBackend() === 'basic_text')) {
+          throw new Error('The system credential store is unavailable. Unlock it before saving an API key.')
+        }
+        return safeStorage.encryptString(value).toString('base64')
+      },
+      decrypt(value) { return safeStorage.decryptString(Buffer.from(value, 'base64')) },
+    })
+    const executors = { codex: CodexExecutor, claude: ClaudeExecutor, command: CommandExecutor }
     const changed = () => {
       if (window && !window.isDestroyed()) window.webContents.send(channels.changed)
     }
-    const engine = new WorkflowEngine(store, new CodexExecutor(codex), changed)
+    const engine = new WorkflowEngine(store, {
+      execute: (execution) => {
+        const Executor = executors[agentDriver(execution.agent)]
+        const executor = new Executor(() => settings.executable(execution.agent.id))
+        return withAgentEndpoint(execution.agent, settings.apiKey(execution.agent), (endpoint) => executor.execute(execution, endpoint))
+      },
+    }, changed)
     const uuid = z.uuid()
     register(channels.load, () => ({
-      bots: store.listBots(), workflows: store.listWorkflows(), projects: store.listProjects(), tasks: store.listTasks(), codexPath: codex(),
+      bots: store.listBots(), workflows: store.listWorkflows(), projects: store.listProjects(), tasks: store.listTasks(),
+      defaultAgent: settings.defaultAgent, agents: settings.list(),
     }))
     register(channels.saveBot, (raw, id) => {
       const input = botSchema.parse(raw)
@@ -104,7 +123,10 @@ else {
       if (!project) throw new Error('Choose an existing project.')
       verifyDirectory(project.workspace)
       const workflow = project.workflowId ? store.getWorkflow(project.workflowId) : undefined
-      return engine.enqueue(snapshotProject(project, workflow, (id) => store.getBot(id)), { kind: 'manual', objective: input.objective })
+      const agent = settings.select(input.agent ?? settings.defaultAgent)
+      const snapshot = snapshotProject(project, workflow, (id) => store.getBot(id), agent)
+      if (snapshot.steps.some((step) => step.kind === 'codex')) settings.executable(agent.id)
+      return engine.enqueue(snapshot, { kind: 'manual', objective: input.objective }, agent)
     })
     register(channels.cancelTask, (id) => engine.cancel(uuid.parse(id)))
     register(channels.deleteTask, (id) => engine.deleteTask(uuid.parse(id)))
@@ -120,8 +142,8 @@ else {
       engine.sendFollowUp(uuid.parse(id), z.string().trim().min(1).max(taskMessageLimit).parse(text))
     })
     register(channels.completeTask, (id) => engine.completeTask(uuid.parse(id)))
-    register(channels.completeHumanStep, (id, accepted, note) => {
-      engine.completeHumanStep(uuid.parse(id), z.boolean().parse(accepted), z.string().trim().min(1).max(12_000).parse(note))
+    register(channels.completeHumanStep, (id, accepted, note, stepIndex) => {
+      engine.completeHumanStep(uuid.parse(id), z.boolean().parse(accepted), z.string().trim().min(1).max(12_000).parse(note), z.number().int().min(0).optional().parse(stepIndex))
     })
     register(channels.answerApproval, (taskId, approvalId, accepted) => {
       engine.answerApproval(uuid.parse(taskId), uuid.parse(approvalId), z.boolean().parse(accepted))
@@ -130,16 +152,28 @@ else {
       const result = await dialog.showOpenDialog(window!, { title: 'Choose a workspace', properties: ['openDirectory'] })
       return result.canceled ? null : result.filePaths[0] ?? null
     })
-    register(channels.chooseCodex, async () => {
-      const result = await dialog.showOpenDialog(window!, { title: 'Choose the Codex CLI executable', properties: ['openFile'] })
+    register(channels.chooseAgentExecutable, async (rawAgent) => {
+      const agent = rawAgent === undefined ? undefined : agentIdSchema.parse(rawAgent)
+      const name = agent ? settings.get(agent).name : 'agent'
+      const result = await dialog.showOpenDialog(window!, { title: `Choose the ${name} executable`, properties: ['openFile'] })
       const selected = result.canceled ? null : result.filePaths[0] ?? null
-      if (selected) {
-        store.setSetting(codexSetting, selected)
+      if (selected && agent) {
+        settings.setExecutable(agent, selected)
         changed()
       }
       return selected
     })
-    register(channels.resetCodex, () => { store.setSetting(codexSetting, ''); changed() })
+    register(channels.saveAgentProfile, (raw, id) => {
+      const agent = settings.saveProfile(raw, id === undefined ? undefined : agentIdSchema.parse(id))
+      changed()
+      return agent
+    })
+    register(channels.resetAgentExecutable, (agent) => { settings.setExecutable(agentIdSchema.parse(agent), ''); changed() })
+    register(channels.saveAgentConnection, (agent, raw) => {
+      settings.setConnection(agentIdSchema.parse(agent), raw)
+      changed()
+    })
+    register(channels.setDefaultAgent, (agent) => { settings.setDefault(agentIdSchema.parse(agent)); changed() })
 
     let closing = false
     app.on('before-quit', (event) => {
